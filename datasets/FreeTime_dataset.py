@@ -1,0 +1,1180 @@
+"""
+FreeTime Dataset - Full Sequence Multi-Frame COLMAP Dataset
+
+This dataset loads:
+1. Camera poses from a reference COLMAP reconstruction
+2. Images from ALL frames (full sequence, no GOP chunking)
+3. Normalized time [0, 1] over the full sequence
+
+Key differences from GIFStream dataset:
+- No GOP_size chunking - uses total_frames for full sequence
+- Time normalized over entire sequence
+- Supports multi-frame COLMAP for 4D initialization (sparse frames)
+
+Supports two formats (auto-detected):
+1. "flat" format: cam00/00001.png
+2. "nested" format: 002-002/000000.jpg (like your elly dataset)
+
+Usage:
+    parser = FreeTimeParser(data_dir, start_frame=0, end_frame=300)
+    dataset = FreeTimeDataset(parser, split="train")
+"""
+
+import os
+import re
+import json
+from typing import Any, Dict, List, Optional, Literal, Tuple
+from pathlib import Path
+
+import cv2
+import imageio.v2 as imageio
+import numpy as np
+import torch
+
+try:
+    # Try new API first (pycolmap >= 3.10)
+    from pycolmap import Reconstruction as PyColmapReconstruction
+    PYCOLMAP_API = "new"
+except ImportError:
+    try:
+        # Fall back to old API (pycolmap < 3.10)
+        from pycolmap import SceneManager
+        PyColmapReconstruction = None
+        PYCOLMAP_API = "old"
+    except ImportError:
+        SceneManager = None
+        PyColmapReconstruction = None
+        PYCOLMAP_API = None
+        print("pycolmap not found. Install with: pip install pycolmap")
+
+from .normalize import (
+    align_principle_axes,
+    similarity_from_cameras,
+    transform_cameras,
+    transform_points,
+)
+
+
+def _load_colmap_points(colmap_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Load 3D points from COLMAP using either new or old pycolmap API.
+
+    Returns:
+        positions: Nx3 float32 array of 3D positions
+        colors: Nx3 uint8 array of RGB colors
+        errors: N float32 array of reprojection errors
+    """
+    if PYCOLMAP_API == "new":
+        rec = PyColmapReconstruction()
+        rec.read(colmap_path)
+        points3D_dict = rec.points3D
+        if len(points3D_dict) == 0:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), np.zeros(0, dtype=np.float32)
+
+        positions_list = []
+        colors_list = []
+        errors_list = []
+        for pt_id, pt in points3D_dict.items():
+            positions_list.append(pt.xyz)
+            colors_list.append(pt.color)
+            errors_list.append(pt.error)
+
+        return (np.array(positions_list, dtype=np.float32),
+                np.array(colors_list, dtype=np.uint8),
+                np.array(errors_list, dtype=np.float32))
+
+    elif PYCOLMAP_API == "old":
+        manager = SceneManager(colmap_path)
+        manager.load_points3D()
+        return (manager.points3D.astype(np.float32),
+                manager.point3D_colors.astype(np.uint8),
+                manager.point3D_errors.astype(np.float32))
+
+    else:
+        raise RuntimeError("pycolmap not available")
+
+
+def _get_rel_paths(path_dir: str) -> List[str]:
+    """Recursively get relative paths of files in a directory."""
+    paths = []
+    for dp, dn, fn in os.walk(path_dir):
+        for f in fn:
+            paths.append(os.path.relpath(os.path.join(dp, f), path_dir))
+    return paths
+
+
+def _detect_image_format(camera_path: str) -> Dict[str, Any]:
+    """Auto-detect image format from the first camera folder."""
+    if not os.path.exists(camera_path):
+        raise ValueError(f"Camera path does not exist: {camera_path}")
+
+    files = sorted([f for f in os.listdir(camera_path)
+                   if f.endswith(('.png', '.jpg', '.jpeg'))])
+    if not files:
+        raise ValueError(f"No image files found in {camera_path}")
+
+    first_file = files[0]
+    extension = Path(first_file).suffix
+    stem = Path(first_file).stem
+
+    frame_digits = len(stem)
+    try:
+        first_frame_num = int(stem)
+        frame_start = first_frame_num
+    except ValueError:
+        frame_start = 0
+
+    return {
+        'extension': extension,
+        'frame_digits': frame_digits,
+        'frame_start': frame_start,
+    }
+
+
+def _detect_colmap_format(imdata) -> Literal["flat", "nested"]:
+    """Detect if COLMAP uses flat names (cam00.png) or nested (002-002/000000.jpg)."""
+    for k in imdata:
+        name = imdata[k].name
+        if '/' in name or '\\' in name:
+            return "nested"
+        else:
+            return "flat"
+    return "flat"
+
+
+def find_available_colmap_frames(sparse_dir: str,
+                                  start_frame: int = 0,
+                                  end_frame: int = 300) -> List[Tuple[int, str]]:
+    """
+    Find all frame-specific COLMAP directories within the frame range.
+
+    Looks for directories named:
+    - frame_XXXXXX (e.g., frame_000000, frame_000060)
+
+    Args:
+        sparse_dir: Path to sparse/ directory
+        start_frame: First frame index (inclusive)
+        end_frame: Last frame index (exclusive)
+
+    Returns:
+        List of (frame_idx, colmap_path) tuples, sorted by frame index
+    """
+    frame_dirs = []
+
+    if not os.path.exists(sparse_dir):
+        return frame_dirs
+
+    for name in os.listdir(sparse_dir):
+        path = os.path.join(sparse_dir, name)
+        if not os.path.isdir(path):
+            continue
+
+        # Match frame_XXXXXX pattern
+        match = re.match(r'frame_(\d+)', name)
+        if match:
+            frame_idx = int(match.group(1))
+
+            # Check if within range
+            if frame_idx < start_frame or frame_idx >= end_frame:
+                continue
+
+            # Check if it's a valid COLMAP directory
+            if (os.path.exists(os.path.join(path, "cameras.bin")) or
+                os.path.exists(os.path.join(path, "cameras.txt"))):
+                frame_dirs.append((frame_idx, path))
+
+    # Sort by frame index
+    frame_dirs.sort(key=lambda x: x[0])
+
+    return frame_dirs
+
+
+class FreeTimeParser:
+    """
+    COLMAP parser for FreeTime - supports full sequence without GOP chunking.
+
+    This parser loads camera poses from a reference COLMAP and sets up
+    image paths for the full video sequence.
+
+    Handles both "flat" (cam00.png) and "nested" (002-002/000000.jpg) formats.
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        factor: int = 1,
+        normalize: bool = False,
+        test_every: int = 8,
+        start_frame: int = 0,
+        end_frame: int = 300,
+        reference_colmap: Optional[str] = None,  # Auto-detect if None
+        image_format: Optional[str] = None,
+        frame_digits: Optional[int] = None,
+        frame_start: Optional[int] = None,
+    ):
+        """
+        Args:
+            data_dir: Path to data directory
+            factor: Image downsampling factor
+            normalize: Whether to normalize world coordinates
+            test_every: Use every N-th camera for testing
+            start_frame: First frame index (inclusive)
+            end_frame: Last frame index (exclusive)
+            reference_colmap: Which COLMAP to use for camera poses (auto-detect if None)
+            image_format: Image extension (auto-detected if None)
+            frame_digits: Number of digits in frame names
+            frame_start: Starting frame index (0 or 1)
+        """
+        self.data_dir = data_dir
+        self.factor = factor
+        self.normalize = normalize
+        self.test_every = test_every
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        self.total_frames = end_frame - start_frame
+
+        # Find COLMAP directory for camera poses
+        # Priority: reference_colmap > sparse/frame_{start_frame} > sparse/0
+        colmap_dir = None
+        sparse_dir = os.path.join(data_dir, "sparse")
+
+        if reference_colmap and os.path.exists(reference_colmap):
+            colmap_dir = reference_colmap
+        else:
+            candidates = [
+                os.path.join(sparse_dir, f"frame_{start_frame:06d}"),
+                os.path.join(sparse_dir, "frame_000000"),
+                os.path.join(sparse_dir, "0"),
+                os.path.join(data_dir, f"colmap_{start_frame}", "sparse/0"),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    # Check if it has COLMAP files
+                    if (os.path.exists(os.path.join(candidate, "cameras.bin")) or
+                        os.path.exists(os.path.join(candidate, "cameras.txt"))):
+                        colmap_dir = candidate
+                        break
+
+        if colmap_dir is None:
+            raise ValueError(f"No COLMAP directory found. Tried: {candidates}")
+
+        print(f"[FreeTimeParser] Using COLMAP: {colmap_dir}")
+        print(f"[FreeTimeParser] Frame range: {start_frame} to {end_frame} ({self.total_frames} frames)")
+        print(f"[FreeTimeParser] Using pycolmap API: {PYCOLMAP_API}")
+
+        # Load COLMAP data using appropriate pycolmap API
+        w2c_mats = []
+        camera_ids = []
+        Ks_dict = dict()
+        params_dict = dict()
+        imsize_dict = dict()
+        mask_dict = dict()
+        bottom = np.array([0, 0, 0, 1]).reshape(1, 4)
+
+        if PYCOLMAP_API == "new":
+            rec = PyColmapReconstruction()
+            rec.read(colmap_dir)
+            imdata = rec.images
+            cameras_dict = rec.cameras
+        elif PYCOLMAP_API == "old":
+            manager = SceneManager(colmap_dir)
+            manager.load_cameras()
+            manager.load_images()
+            manager.load_points3D()
+            imdata = manager.images
+            cameras_dict = manager.cameras
+        else:
+            raise RuntimeError("pycolmap not available")
+
+        for k in imdata:
+            im = imdata[k]
+
+            # Extract rotation and translation based on API
+            if PYCOLMAP_API == "new":
+                # New API: im.cam_from_world.rotation.quat gives [x, y, z, w]
+                quat = im.cam_from_world.rotation.quat
+                x, y, z, w = quat
+                rot = np.array([
+                    [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+                    [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+                    [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+                ])
+                trans = np.array(im.cam_from_world.translation).reshape(3, 1)
+            else:
+                # Old API: im.R() gives rotation matrix, im.tvec gives translation
+                rot = im.R()
+                trans = im.tvec.reshape(3, 1)
+
+            w2c = np.concatenate([np.concatenate([rot, trans], 1), bottom], axis=0)
+            w2c_mats.append(w2c)
+
+            camera_id = im.camera_id
+            camera_ids.append(camera_id)
+
+            cam = cameras_dict[camera_id]
+
+            # Extract intrinsics based on API
+            if PYCOLMAP_API == "new":
+                fx = cam.focal_length_x
+                fy = cam.focal_length_y
+                cx = cam.principal_point_x
+                cy = cam.principal_point_y
+                cam_width = cam.width
+                cam_height = cam.height
+                model_name = str(cam.model)
+                cam_params = cam.params
+            else:
+                fx, fy, cx, cy = cam.fx, cam.fy, cam.cx, cam.cy
+                cam_width = cam.width
+                cam_height = cam.height
+                model_name = str(cam.camera_type)
+                cam_params = []  # Old API handles distortion separately
+
+            K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+            K[:2, :] /= factor
+            Ks_dict[camera_id] = K
+
+            # Distortion parameters
+            if "PINHOLE" in model_name or model_name in ["0", "1"]:
+                params = np.empty(0, dtype=np.float32)
+                camtype = "perspective"
+            elif "SIMPLE_RADIAL" in model_name or model_name == "2":
+                if PYCOLMAP_API == "old":
+                    params = np.array([cam.k1 if hasattr(cam, 'k1') else 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                else:
+                    params = np.array([cam_params[3] if len(cam_params) > 3 else 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                camtype = "perspective"
+            elif "RADIAL" in model_name or model_name == "3":
+                if PYCOLMAP_API == "old":
+                    k1 = cam.k1 if hasattr(cam, 'k1') else 0.0
+                    k2 = cam.k2 if hasattr(cam, 'k2') else 0.0
+                else:
+                    k1 = cam_params[3] if len(cam_params) > 3 else 0.0
+                    k2 = cam_params[4] if len(cam_params) > 4 else 0.0
+                params = np.array([k1, k2, 0.0, 0.0], dtype=np.float32)
+                camtype = "perspective"
+            elif "OPENCV" in model_name and "FISHEYE" not in model_name or model_name == "4":
+                if PYCOLMAP_API == "old":
+                    k1 = cam.k1 if hasattr(cam, 'k1') else 0.0
+                    k2 = cam.k2 if hasattr(cam, 'k2') else 0.0
+                    p1 = cam.p1 if hasattr(cam, 'p1') else 0.0
+                    p2 = cam.p2 if hasattr(cam, 'p2') else 0.0
+                else:
+                    k1 = cam_params[4] if len(cam_params) > 4 else 0.0
+                    k2 = cam_params[5] if len(cam_params) > 5 else 0.0
+                    p1 = cam_params[6] if len(cam_params) > 6 else 0.0
+                    p2 = cam_params[7] if len(cam_params) > 7 else 0.0
+                params = np.array([k1, k2, p1, p2], dtype=np.float32)
+                camtype = "perspective"
+            elif "FISHEYE" in model_name or model_name == "5":
+                if PYCOLMAP_API == "old":
+                    k1 = cam.k1 if hasattr(cam, 'k1') else 0.0
+                    k2 = cam.k2 if hasattr(cam, 'k2') else 0.0
+                    k3 = cam.k3 if hasattr(cam, 'k3') else 0.0
+                    k4 = cam.k4 if hasattr(cam, 'k4') else 0.0
+                else:
+                    k1 = cam_params[4] if len(cam_params) > 4 else 0.0
+                    k2 = cam_params[5] if len(cam_params) > 5 else 0.0
+                    k3 = cam_params[6] if len(cam_params) > 6 else 0.0
+                    k4 = cam_params[7] if len(cam_params) > 7 else 0.0
+                params = np.array([k1, k2, k3, k4], dtype=np.float32)
+                camtype = "fisheye"
+            else:
+                params = np.empty(0, dtype=np.float32)
+                camtype = "perspective"
+
+            params_dict[camera_id] = params
+            imsize_dict[camera_id] = (cam_width // factor, cam_height // factor)
+            mask_dict[camera_id] = None
+
+        print(f"[FreeTimeParser] {len(imdata)} cameras loaded")
+
+        w2c_mats = np.stack(w2c_mats, axis=0)
+        camtoworlds = np.linalg.inv(w2c_mats)
+
+        # Detect COLMAP format and extract camera names
+        colmap_format = _detect_colmap_format(imdata)
+        print(f"[FreeTimeParser] Detected COLMAP format: {colmap_format}")
+
+        if colmap_format == "flat":
+            camera_names = [Path(imdata[k].name).stem for k in imdata]
+        else:
+            # Nested format: 002-002/000000.jpg -> use parent folder name
+            camera_names = [Path(imdata[k].name).parent.name for k in imdata]
+
+        # Sort by camera name
+        inds = np.argsort(camera_names)
+        camera_names = [camera_names[i] for i in inds]
+        camtoworlds = camtoworlds[inds]
+        camera_ids = [camera_ids[i] for i in inds]
+
+        # 3D points - use helper function that handles both APIs
+        points, points_rgb, points_err = _load_colmap_points(colmap_dir)
+
+        # Normalize world space
+        if normalize:
+            T1 = similarity_from_cameras(camtoworlds)
+            camtoworlds = transform_cameras(T1, camtoworlds)
+            points = transform_points(T1, points)
+
+            T2 = align_principle_axes(points)
+            camtoworlds = transform_cameras(T2, camtoworlds)
+            points = transform_points(T2, points)
+
+            transform = T2 @ T1
+        else:
+            transform = np.eye(4)
+
+        # Camera paths (folders containing images)
+        images_dir = os.path.join(data_dir, "images")
+        self.campaths = [os.path.join(images_dir, x)
+                        for x in sorted(os.listdir(images_dir))]
+
+        print(f"[FreeTimeParser] Found {len(self.campaths)} camera folders")
+
+        # Auto-detect image format from first camera folder
+        if image_format is None or frame_digits is None or frame_start is None:
+            detected = _detect_image_format(self.campaths[0])
+            print(f"[FreeTimeParser] Auto-detected: {detected}")
+            self.image_format = image_format or detected['extension']
+            self.frame_digits = frame_digits if frame_digits is not None else detected['frame_digits']
+            self.frame_start_offset = frame_start if frame_start is not None else detected['frame_start']
+        else:
+            self.image_format = f".{image_format}" if not image_format.startswith('.') else image_format
+            self.frame_digits = frame_digits
+            self.frame_start_offset = frame_start
+
+        print(f"[FreeTimeParser] Image format: {self.image_format}, "
+              f"{self.frame_digits} digits, start_offset={self.frame_start_offset}")
+
+        # Store all attributes
+        self.camera_names = camera_names
+        self.camtoworlds = camtoworlds
+        self.camera_ids = camera_ids
+        self.Ks_dict = Ks_dict
+        self.params_dict = params_dict
+        self.imsize_dict = imsize_dict
+        self.mask_dict = mask_dict
+        self.points = points
+        self.points_err = points_err
+        self.points_rgb = points_rgb
+        self.transform = transform
+        self.max_camera_id = max(camera_ids) if camera_ids else 0
+        self.colmap_format = colmap_format
+        self.camtype = camtype
+
+        # Undistortion maps
+        self.mapx_dict = dict()
+        self.mapy_dict = dict()
+        self.roi_undist_dict = dict()
+        self._setup_undistortion()
+
+        # Scene scale
+        camera_locations = camtoworlds[:, :3, 3]
+        scene_center = np.mean(camera_locations, axis=0)
+        dists = np.linalg.norm(camera_locations - scene_center, axis=1)
+        self.scene_scale = np.max(dists)
+        self.extent = self.scene_scale  # Alias for compatibility
+
+        print(f"[FreeTimeParser] Scene scale: {self.scene_scale:.3f}")
+
+    def _setup_undistortion(self):
+        """Setup undistortion maps for distorted cameras."""
+        for camera_id in self.params_dict.keys():
+            params = self.params_dict[camera_id]
+            if len(params) == 0:
+                continue
+
+            K = self.Ks_dict[camera_id]
+            width, height = self.imsize_dict[camera_id]
+
+            if self.camtype == "perspective":
+                K_undist, roi_undist = cv2.getOptimalNewCameraMatrix(
+                    K, params, (width, height), 0
+                )
+                mapx, mapy = cv2.initUndistortRectifyMap(
+                    K, params, None, K_undist, (width, height), cv2.CV_32FC1
+                )
+            elif self.camtype == "fisheye":
+                fx, fy = K[0, 0], K[1, 1]
+                cx, cy = K[0, 2], K[1, 2]
+                grid_x, grid_y = np.meshgrid(
+                    np.arange(width, dtype=np.float32),
+                    np.arange(height, dtype=np.float32),
+                    indexing="xy",
+                )
+                x1 = (grid_x - cx) / fx
+                y1 = (grid_y - cy) / fy
+                theta = np.sqrt(x1**2 + y1**2)
+                r = 1.0 + params[0] * theta**2 + params[1] * theta**4 + \
+                    params[2] * theta**6 + params[3] * theta**8
+                mapx = (fx * x1 * r + width // 2).astype(np.float32)
+                mapy = (fy * y1 * r + height // 2).astype(np.float32)
+
+                mask = np.logical_and(
+                    np.logical_and(mapx > 0, mapy > 0),
+                    np.logical_and(mapx < width - 1, mapy < height - 1),
+                )
+                y_indices, x_indices = np.nonzero(mask)
+                y_min, y_max = y_indices.min(), y_indices.max() + 1
+                x_min, x_max = x_indices.min(), x_indices.max() + 1
+                K_undist = K.copy()
+                K_undist[0, 2] -= x_min
+                K_undist[1, 2] -= y_min
+                roi_undist = [x_min, y_min, x_max - x_min, y_max - y_min]
+            else:
+                continue
+
+            self.mapx_dict[camera_id] = mapx
+            self.mapy_dict[camera_id] = mapy
+            self.Ks_dict[camera_id] = K_undist
+            self.roi_undist_dict[camera_id] = roi_undist
+            self.imsize_dict[camera_id] = (roi_undist[2], roi_undist[3])
+
+
+class FreeTimeDataset:
+    """
+    Dataset for FreeTime training - full sequence without GOP chunking.
+
+    Each item is a (camera, frame) pair from the full sequence.
+    Time is normalized to [0, 1] over the entire sequence.
+    """
+
+    def __init__(
+        self,
+        parser: FreeTimeParser,
+        split: str = "train",
+        patch_size: Optional[int] = None,
+        load_depths: bool = False,
+        test_set: List[int] = None,
+        remove_set: List[int] = None,
+    ):
+        """
+        Args:
+            parser: FreeTimeParser instance
+            split: "train" or "test"
+            patch_size: If set, random crop to this size
+            load_depths: Whether to load depth data
+            test_set: List of camera indices for testing
+            remove_set: List of camera indices to exclude
+        """
+        self.parser = parser
+        self.split = split
+        self.patch_size = patch_size
+        self.load_depths = load_depths
+        self.total_frames = parser.total_frames
+        self.start_frame = parser.start_frame
+
+        if test_set is None:
+            test_set = [0]  # Default: first camera for testing
+
+        num_cameras = len(parser.camera_names)
+
+        # Build camera indices for this split
+        if split == "train":
+            self.camera_indices = [i for i in range(num_cameras)
+                                   if i not in test_set and
+                                   (remove_set is None or i not in remove_set)]
+        else:
+            self.camera_indices = [i for i in test_set if i < num_cameras]
+
+        # Build all (camera, frame) pairs
+        # Frame indices are relative to start_frame
+        self.pairs = []
+        for cam_idx in self.camera_indices:
+            for frame_offset in range(self.total_frames):
+                self.pairs.append((cam_idx, frame_offset))
+
+        print(f"[FreeTimeDataset] {split}: {len(self.camera_indices)} cameras × "
+              f"{self.total_frames} frames = {len(self.pairs)} samples")
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def _get_image_path(self, camera_path: str, frame_idx: int) -> str:
+        """Generate image path for a given frame."""
+        # frame_idx is the actual frame number (not offset)
+        frame_num = frame_idx + self.parser.frame_start_offset
+        frame_name = f"{frame_num:0{self.parser.frame_digits}d}{self.parser.image_format}"
+        return os.path.join(camera_path, frame_name)
+
+    def __getitem__(self, item: int) -> Dict[str, Any]:
+        cam_idx, frame_offset = self.pairs[item]
+        camera_path = self.parser.campaths[cam_idx]
+
+        # Actual frame index = start_frame + offset
+        frame_idx = self.start_frame + frame_offset
+
+        # Load image
+        image_path = self._get_image_path(camera_path, frame_idx)
+        image = imageio.imread(image_path)[..., :3]
+        image = cv2.resize(
+            image,
+            dsize=(image.shape[1] // self.parser.factor,
+                   image.shape[0] // self.parser.factor),
+            interpolation=cv2.INTER_LINEAR
+        )
+
+        camera_id = self.parser.camera_ids[cam_idx]
+        K = self.parser.Ks_dict[camera_id].copy()
+        params = self.parser.params_dict[camera_id]
+        camtoworlds = self.parser.camtoworlds[cam_idx]
+        mask = self.parser.mask_dict[camera_id]
+
+        # Apply undistortion if needed
+        if len(params) > 0:
+            mapx = self.parser.mapx_dict[camera_id]
+            mapy = self.parser.mapy_dict[camera_id]
+            image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+            x, y, w, h = self.parser.roi_undist_dict[camera_id]
+            image = image[y:y+h, x:x+w]
+
+        # Random crop if specified
+        if self.patch_size is not None:
+            h, w = image.shape[:2]
+            x = np.random.randint(0, max(w - self.patch_size, 1))
+            y = np.random.randint(0, max(h - self.patch_size, 1))
+            image = image[y:y+self.patch_size, x:x+self.patch_size]
+            K[0, 2] -= x
+            K[1, 2] -= y
+
+        # CRITICAL: Normalize time over FULL sequence (not GOP)
+        # time = frame_offset / (total_frames - 1) -> [0, 1]
+        time = frame_offset / max(self.total_frames - 1, 1)
+
+        data = {
+            "K": torch.from_numpy(K).float(),
+            "camtoworld": torch.from_numpy(camtoworlds).float(),
+            "image": torch.from_numpy(image).float(),
+            "image_id": item,
+            "time": time,  # Normalized [0, 1] over full sequence
+            "frame_idx": frame_idx,  # Actual frame number
+            "frame_offset": frame_offset,  # Offset from start_frame
+            "camera_id": camera_id - 1,
+            "camera_idx": cam_idx,
+        }
+
+        if mask is not None:
+            data["mask"] = torch.from_numpy(mask).bool()
+
+        return data
+
+
+def load_multiframe_colmap_points(data_dir: str,
+                                   start_frame: int = 0,
+                                   end_frame: int = 300,
+                                   frame_step: int = 1,
+                                   max_error: float = 2.0,
+                                   match_threshold: float = 0.1,
+                                   transform: Optional[np.ndarray] = None) -> Dict[str, torch.Tensor]:
+    """
+    Load 3D points from multiple frame-specific COLMAP reconstructions.
+    Matches points across frames and computes velocities.
+
+    Handles SPARSE COLMAP frames (not every frame needs to have SfM).
+
+    Args:
+        data_dir: Path to data directory
+        start_frame: First frame index
+        end_frame: Last frame index
+        frame_step: Load every N-th frame (e.g., 10 means frames 0, 10, 20, ...)
+        max_error: Maximum reprojection error filter
+        match_threshold: Maximum distance for KNN matching
+        transform: Optional [4, 4] transformation matrix to apply to points
+                  (e.g., from FreeTimeParser.transform for coordinate alignment)
+
+    Returns:
+        Dictionary with positions, times, velocities, colors, has_velocity
+    """
+    from scipy.spatial import cKDTree
+
+    sparse_dir = os.path.join(data_dir, "sparse")
+
+    # Find available COLMAP frames within range
+    frame_dirs = find_available_colmap_frames(sparse_dir, start_frame, end_frame)
+
+    # Filter by frame_step (only keep frames matching start_frame + k*frame_step)
+    if frame_step > 1:
+        frame_dirs = [(idx, path) for idx, path in frame_dirs
+                      if (idx - start_frame) % frame_step == 0]
+
+    print(f"[MultiFrameCOLMAP] Found {len(frame_dirs)} COLMAP reconstructions "
+          f"in range [{start_frame}, {end_frame}) with step={frame_step}")
+
+    if len(frame_dirs) == 0:
+        raise ValueError(f"No frame_XXXXXX directories found in {sparse_dir} "
+                        f"within range [{start_frame}, {end_frame})")
+
+    for frame_idx, path in frame_dirs[:5]:
+        print(f"  Frame {frame_idx}: {path}")
+    if len(frame_dirs) > 5:
+        print(f"  ... and {len(frame_dirs) - 5} more")
+
+    # Total frames for time normalization
+    total_frames = end_frame - start_frame
+
+    # Load points from each available frame
+    all_positions = []
+    all_times = []
+    all_velocities = []
+    all_colors = []
+    all_has_velocity = []
+
+    prev_points = None
+    prev_colors = None
+    prev_time = None
+    prev_frame_idx = None
+
+    for frame_idx, colmap_path in frame_dirs:
+        try:
+            # Load points using API-agnostic helper
+            positions, colors, errors = _load_colmap_points(colmap_path)
+
+            if len(positions) == 0:
+                print(f"  Frame {frame_idx}: No points, skipping")
+                continue
+
+            # Filter by error
+            valid = errors < max_error
+            positions = positions[valid]
+            colors = colors[valid]
+
+            # Normalize time: (frame_idx - start_frame) / (end_frame - start_frame - 1)
+            time = (frame_idx - start_frame) / max(total_frames - 1, 1)
+
+            print(f"  Frame {frame_idx} (t={time:.3f}): {len(positions)} points")
+
+            if prev_points is not None and len(positions) > 0 and len(prev_points) > 0:
+                # Match with previous frame using KNN
+                tree = cKDTree(positions)
+                distances, indices = tree.query(prev_points, k=1)
+
+                valid_matches = distances < match_threshold
+                n_matched = valid_matches.sum()
+
+                if n_matched > 0:
+                    # Compute velocity for matched points
+                    matched_prev = prev_points[valid_matches]
+                    matched_curr = positions[indices[valid_matches]]
+
+                    # FIX: Use normalized time dt but cap to reasonable range
+                    # dt is already in normalized time [0,1], velocity should be in world_units/normalized_time
+                    # This is correct for the motion model: µx(t) = µx + v * (t - µt)
+                    dt = time - prev_time
+                    dt = max(dt, 1e-6)  # Prevent division by zero
+
+                    # Velocity in normalized time units (world_units per normalized_time_unit)
+                    velocities = (matched_curr - matched_prev) / dt
+
+                    all_positions.append(matched_prev)
+                    all_times.append(np.full((n_matched, 1), prev_time, dtype=np.float32))
+                    all_velocities.append(velocities.astype(np.float32))
+                    all_colors.append(prev_colors[valid_matches])
+                    all_has_velocity.append(np.ones(n_matched, dtype=bool))
+
+                    print(f"    Matched {n_matched} points with frame {prev_frame_idx}")
+
+                # Add unmatched points from previous frame (no velocity)
+                unmatched = ~valid_matches
+                n_unmatched = unmatched.sum()
+                if n_unmatched > 0:
+                    all_positions.append(prev_points[unmatched])
+                    all_times.append(np.full((n_unmatched, 1), prev_time, dtype=np.float32))
+                    all_velocities.append(np.zeros((n_unmatched, 3), dtype=np.float32))
+                    all_colors.append(prev_colors[unmatched])
+                    all_has_velocity.append(np.zeros(n_unmatched, dtype=bool))
+
+            elif prev_points is not None:
+                # No matching possible, add prev points without velocity
+                n_prev = len(prev_points)
+                all_positions.append(prev_points)
+                all_times.append(np.full((n_prev, 1), prev_time, dtype=np.float32))
+                all_velocities.append(np.zeros((n_prev, 3), dtype=np.float32))
+                all_colors.append(prev_colors)
+                all_has_velocity.append(np.zeros(n_prev, dtype=bool))
+
+            # Update previous
+            prev_points = positions
+            prev_colors = colors
+            prev_time = time
+            prev_frame_idx = frame_idx
+
+        except Exception as e:
+            print(f"  Warning: Failed to load frame {frame_idx}: {e}")
+            continue
+
+    # Add last frame's points (no velocity)
+    if prev_points is not None:
+        n_last = len(prev_points)
+        all_positions.append(prev_points)
+        all_times.append(np.full((n_last, 1), prev_time, dtype=np.float32))
+        all_velocities.append(np.zeros((n_last, 3), dtype=np.float32))
+        all_colors.append(prev_colors)
+        all_has_velocity.append(np.zeros(n_last, dtype=bool))
+
+    if len(all_positions) == 0:
+        raise ValueError("No points loaded from any COLMAP frame")
+
+    # Concatenate initial data
+    positions = np.concatenate(all_positions, axis=0)
+    times = np.concatenate(all_times, axis=0)
+    velocities = np.concatenate(all_velocities, axis=0)
+    colors = np.concatenate(all_colors, axis=0)
+    has_velocity = np.concatenate(all_has_velocity, axis=0)
+
+    print(f"\n[MultiFrameCOLMAP] Initial: {len(positions)} points")
+    print(f"  Time range: [{times.min():.3f}, {times.max():.3f}]")
+
+    # =================================================================
+    # TEMPORAL EXTRAPOLATION: Cover the full [0, 1] time range
+    # =================================================================
+    # If COLMAP only covers part of the sequence, extrapolate points
+    # with velocities to create anchors at later times.
+    # FreeTimeGS paper: Each anchor has position, time, velocity.
+    # Position at time t: p(t) = p(t0) + v * (t - t0)
+    # =================================================================
+    time_max_initial = times.max()
+    time_coverage_threshold = 0.9  # If we cover less than 90%, extrapolate
+
+    if time_max_initial < time_coverage_threshold:
+        print(f"\n[MultiFrameCOLMAP] Extrapolating to cover full time range...")
+        print(f"  Current coverage: {time_max_initial:.3f}")
+
+        # Strategy 1: Extrapolate points WITH velocity to later times
+        vel_mask = has_velocity
+        n_with_vel = vel_mask.sum()
+
+        if n_with_vel > 0:
+            vel_positions = positions[vel_mask]
+            vel_times = times[vel_mask]
+            vel_velocities = velocities[vel_mask]
+            vel_colors = colors[vel_mask]
+
+            # Limit extrapolation to avoid memory explosion
+            # Sample a subset if too many points with velocity
+            max_vel_points = 200000  # Keep extrapolation manageable
+            if n_with_vel > max_vel_points:
+                sample_idx = np.random.choice(n_with_vel, max_vel_points, replace=False)
+                vel_positions = vel_positions[sample_idx]
+                vel_times = vel_times[sample_idx]
+                vel_velocities = vel_velocities[sample_idx]
+                vel_colors = vel_colors[sample_idx]
+                print(f"  Sampled {max_vel_points} of {n_with_vel} velocity points for extrapolation")
+                n_with_vel = max_vel_points
+
+            # Create extrapolated copies at target times
+            # Target times: spread between current max and 1.0
+            extrapolate_times = np.array([0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+            extrapolate_times = extrapolate_times[extrapolate_times > time_max_initial]
+
+            extra_positions = []
+            extra_times = []
+            extra_velocities = []
+            extra_colors = []
+            extra_has_velocity = []
+
+            for target_time in extrapolate_times:
+                # Extrapolate: p(target) = p(t0) + v * (target - t0)
+                dt = target_time - vel_times  # [N, 1]
+                extrapolated = vel_positions + vel_velocities * dt
+
+                extra_positions.append(extrapolated)
+                extra_times.append(np.full_like(vel_times, target_time))
+                extra_velocities.append(vel_velocities.copy())  # Keep same velocity
+                extra_colors.append(vel_colors.copy())
+                extra_has_velocity.append(np.ones(len(vel_positions), dtype=bool))
+
+            if extra_positions:
+                positions = np.concatenate([positions] + extra_positions, axis=0)
+                times = np.concatenate([times] + extra_times, axis=0)
+                velocities = np.concatenate([velocities] + extra_velocities, axis=0)
+                colors = np.concatenate([colors] + extra_colors, axis=0)
+                has_velocity = np.concatenate([has_velocity] + extra_has_velocity, axis=0)
+
+                print(f"  Extrapolated {n_with_vel} points to {len(extrapolate_times)} time steps")
+                print(f"  Added {len(extra_positions) * n_with_vel} extrapolated anchors")
+
+        # Strategy 2: Also add STATIC anchors at later times
+        # For points WITHOUT velocity (likely static background), duplicate at various times
+        static_mask = ~has_velocity[:len(all_positions[0])] if len(all_positions) > 0 else np.zeros(0, dtype=bool)
+        n_static = static_mask.sum()
+
+        if n_static > 0:
+            # Sample static points to spread across time
+            static_positions = positions[:len(all_positions[0])][static_mask]
+            static_colors = colors[:len(all_positions[0])][static_mask]
+
+            # Only add a subset at later times (avoid explosion)
+            n_sample = min(n_static, 5000)
+            sample_idx = np.random.choice(n_static, n_sample, replace=False)
+
+            static_sample_pos = static_positions[sample_idx]
+            static_sample_colors = static_colors[sample_idx]
+
+            # Add at mid and late times
+            for target_time in [0.5, 0.75, 1.0]:
+                if target_time > time_max_initial:
+                    positions = np.concatenate([positions, static_sample_pos], axis=0)
+                    times = np.concatenate([times, np.full((n_sample, 1), target_time, dtype=np.float32)], axis=0)
+                    velocities = np.concatenate([velocities, np.zeros((n_sample, 3), dtype=np.float32)], axis=0)
+                    colors = np.concatenate([colors, static_sample_colors], axis=0)
+                    has_velocity = np.concatenate([has_velocity, np.zeros(n_sample, dtype=bool)], axis=0)
+
+            print(f"  Added {n_sample} static anchor samples at later times")
+
+        print(f"  Final time range: [{times.min():.3f}, {times.max():.3f}]")
+        print(f"  Total points after extrapolation: {len(positions)}")
+
+    # Apply optional coordinate transform (e.g., from FreeTimeParser for normalization)
+    if transform is not None:
+        print(f"\n[MultiFrameCOLMAP] Applying coordinate transform...")
+        transform_t = torch.from_numpy(transform).float()
+
+        # Transform positions: p' = T @ [p; 1]
+        positions_t = torch.from_numpy(positions).float()
+        ones = torch.ones(len(positions_t), 1)
+        positions_h = torch.cat([positions_t, ones], dim=1)  # [N, 4]
+        positions_transformed = (transform_t @ positions_h.T).T[:, :3]  # [N, 3]
+
+        # Transform velocities: v' = R @ v (rotation only, no translation)
+        R = transform_t[:3, :3]  # [3, 3]
+        velocities_t = torch.from_numpy(velocities).float()
+        velocities_transformed = velocities_t @ R.T  # [N, 3]
+
+        result = {
+            'positions': positions_transformed,
+            'times': torch.from_numpy(times).float(),
+            'velocities': velocities_transformed,
+            'colors': torch.from_numpy(colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+    else:
+        result = {
+            'positions': torch.from_numpy(positions).float(),
+            'times': torch.from_numpy(times).float(),
+            'velocities': torch.from_numpy(velocities).float(),
+            'colors': torch.from_numpy(colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+
+    print(f"\n[MultiFrameCOLMAP] Final: {len(result['positions'])} points")
+    print(f"  With velocity: {result['has_velocity'].sum().item()}")
+    print(f"  Time range: [{result['times'].min():.3f}, {result['times'].max():.3f}]")
+
+    vel_mags = result['velocities'].norm(dim=1)
+    has_vel = result['has_velocity']
+    if has_vel.any():
+        print(f"  Velocity magnitude (matched): "
+              f"min={vel_mags[has_vel].min():.4f}, "
+              f"max={vel_mags[has_vel].max():.4f}, "
+              f"mean={vel_mags[has_vel].mean():.4f}")
+
+    return result
+
+
+def load_single_frame_with_velocity(data_dir: str,
+                                     start_frame: int = 0,
+                                     end_frame: int = 300,
+                                     reference_time: float = 0.5,
+                                     max_error: float = 2.0,
+                                     match_threshold: float = 0.1,
+                                     transform: Optional[np.ndarray] = None) -> Dict[str, torch.Tensor]:
+    """
+    Load 3D points from a SINGLE reference frame and compute velocity by matching
+    with the next frame. This follows the paper's approach more closely:
+
+    "For each video frame, we first use ROMA to obtain 2D matches...
+     These 3D points and the corresponding time step are used to initialize
+     the position and time of Gaussian primitives. Subsequently, 3D points
+     of two video frames are matched by k-nearest neighbor algorithm, and
+     the translation between the point pairs are taken as the velocity."
+
+    Key insight: ONE set of Gaussians moves through time via µx(t) = µx + v*(t-µt)
+
+    IMPORTANT: reference_time should be ~0.5 (middle of sequence) so Gaussians
+    can move both forward and backward in time using velocity.
+    With µt=0.5 and velocity v:
+      - At t=0: position = µx + v*(0 - 0.5) = µx - 0.5v
+      - At t=1: position = µx + v*(1 - 0.5) = µx + 0.5v
+
+    Args:
+        data_dir: Path to data directory
+        start_frame: First frame index (used as reference)
+        end_frame: Last frame index
+        reference_time: Time value for the reference frame (default 0.5 = middle)
+        max_error: Maximum reprojection error filter
+        match_threshold: Maximum distance for KNN matching
+        transform: Optional [4, 4] transformation matrix to apply to points
+                  (e.g., from FreeTimeParser.transform for coordinate alignment)
+
+    Returns:
+        Dictionary with positions, times, velocities, colors, has_velocity
+    """
+    from scipy.spatial import cKDTree
+
+    sparse_dir = os.path.join(data_dir, "sparse")
+
+    # Find first two available COLMAP frames
+    frame_dirs = find_available_colmap_frames(sparse_dir, start_frame, end_frame)
+
+    print(f"[SingleFrameInit] Found {len(frame_dirs)} COLMAP reconstructions")
+
+    if len(frame_dirs) < 2:
+        raise ValueError(f"Need at least 2 COLMAP frames for velocity estimation, "
+                        f"found {len(frame_dirs)}")
+
+    # Use first frame as reference, second for velocity computation
+    ref_frame_idx, ref_colmap_path = frame_dirs[0]
+    next_frame_idx, next_colmap_path = frame_dirs[1]
+
+    print(f"  Reference frame: {ref_frame_idx}")
+    print(f"  Next frame for velocity: {next_frame_idx}")
+
+    # Load reference frame points using API-agnostic helper
+    ref_positions, ref_colors, ref_errors = _load_colmap_points(ref_colmap_path)
+
+    # Filter by error
+    valid = ref_errors < max_error
+    ref_positions = ref_positions[valid]
+    ref_colors = ref_colors[valid]
+
+    print(f"  Reference frame points (after error filter): {len(ref_positions)}")
+
+    # Load next frame points for velocity matching
+    next_positions, _, next_errors = _load_colmap_points(next_colmap_path)
+
+    valid_next = next_errors < max_error
+    next_positions = next_positions[valid_next]
+
+    print(f"  Next frame points (after error filter): {len(next_positions)}")
+
+    # Compute time difference in normalized time units
+    total_frames = end_frame - start_frame
+    dt = (next_frame_idx - ref_frame_idx) / max(total_frames - 1, 1)
+    dt = max(dt, 1e-6)  # Prevent division by zero
+
+    # Match reference points to next frame using KNN
+    N = len(ref_positions)
+    velocities = np.zeros((N, 3), dtype=np.float32)
+    has_velocity = np.zeros(N, dtype=bool)
+
+    if len(next_positions) > 0:
+        tree = cKDTree(next_positions)
+        distances, indices = tree.query(ref_positions, k=1)
+
+        valid_matches = distances < match_threshold
+        n_matched = valid_matches.sum()
+
+        if n_matched > 0:
+            matched_ref = ref_positions[valid_matches]
+            matched_next = next_positions[indices[valid_matches]]
+
+            # Velocity = (position_next - position_ref) / dt
+            matched_velocities = (matched_next - matched_ref) / dt
+            velocities[valid_matches] = matched_velocities
+            has_velocity[valid_matches] = True
+
+            print(f"  Matched {n_matched}/{N} points ({100*n_matched/N:.1f}%)")
+
+    # All points have the same reference time
+    times = np.full((N, 1), reference_time, dtype=np.float32)
+
+    # Apply optional coordinate transform
+    if transform is not None:
+        print(f"\n[SingleFrameInit] Applying coordinate transform...")
+        transform_t = torch.from_numpy(transform).float()
+
+        # Transform positions: p' = T @ [p; 1]
+        positions_t = torch.from_numpy(ref_positions).float()
+        ones = torch.ones(len(positions_t), 1)
+        positions_h = torch.cat([positions_t, ones], dim=1)  # [N, 4]
+        positions_transformed = (transform_t @ positions_h.T).T[:, :3]  # [N, 3]
+
+        # Transform velocities: v' = R @ v (rotation only)
+        R = transform_t[:3, :3]  # [3, 3]
+        velocities_t = torch.from_numpy(velocities).float()
+        velocities_transformed = velocities_t @ R.T  # [N, 3]
+
+        result = {
+            'positions': positions_transformed,
+            'times': torch.from_numpy(times).float(),
+            'velocities': velocities_transformed,
+            'colors': torch.from_numpy(ref_colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+    else:
+        result = {
+            'positions': torch.from_numpy(ref_positions).float(),
+            'times': torch.from_numpy(times).float(),
+            'velocities': torch.from_numpy(velocities).float(),
+            'colors': torch.from_numpy(ref_colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+
+    print(f"\n[SingleFrameInit] Final: {N} points")
+    print(f"  With velocity: {result['has_velocity'].sum().item()} ({100*result['has_velocity'].sum().item()/N:.1f}%)")
+    print(f"  Reference time: {reference_time}")
+
+    vel_mags = result['velocities'].norm(dim=1)
+    has_vel = result['has_velocity']
+    if has_vel.any():
+        print(f"  Velocity magnitude: "
+              f"min={vel_mags[has_vel].min():.4f}, "
+              f"max={vel_mags[has_vel].max():.4f}, "
+              f"mean={vel_mags[has_vel].mean():.4f}")
+
+    return result
+
+
+if __name__ == "__main__":
+    import argparse
+
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument("--data_dir", type=str, required=True)
+    arg_parser.add_argument("--start_frame", type=int, default=0)
+    arg_parser.add_argument("--end_frame", type=int, default=300)
+    arg_parser.add_argument("--factor", type=int, default=1)
+    arg_parser.add_argument("--test_4d_init", action="store_true",
+                           help="Test 4D initialization from multi-frame COLMAP")
+    args = arg_parser.parse_args()
+
+    print(f"\n{'='*60}")
+    print("FreeTime Dataset Test")
+    print(f"{'='*60}")
+
+    # Test parser
+    parser = FreeTimeParser(
+        data_dir=args.data_dir,
+        factor=args.factor,
+        start_frame=args.start_frame,
+        end_frame=args.end_frame,
+    )
+
+    # Test dataset
+    dataset = FreeTimeDataset(parser, split="train")
+    print(f"\nDataset size: {len(dataset)}")
+
+    # Test loading a few samples
+    print("\nTesting image loading...")
+    for i in [0, len(dataset) // 2, len(dataset) - 1]:
+        data = dataset[i]
+        print(f"  Sample {i}: image={tuple(data['image'].shape)}, "
+              f"time={data['time']:.3f}, frame={data['frame_idx']}")
+
+    # Test 4D initialization
+    if args.test_4d_init:
+        print(f"\n{'='*60}")
+        print("Testing 4D Initialization from Multi-Frame COLMAP")
+        print(f"{'='*60}")
+
+        init_data = load_multiframe_colmap_points(
+            args.data_dir,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
+        )
+
+        print(f"\n4D Init Summary:")
+        print(f"  Positions: {init_data['positions'].shape}")
+        print(f"  Times: {init_data['times'].shape}")
+        print(f"  Velocities: {init_data['velocities'].shape}")
+        print(f"  Has velocity: {init_data['has_velocity'].sum().item()}/{len(init_data['has_velocity'])}")

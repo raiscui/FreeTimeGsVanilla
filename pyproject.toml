@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[project]
+name = "freetimegsroma"
+version = "0.1.0"
+description = "My project using RoMaV2"
+requires-python = ">=3.12"
+dependencies = [
+    "romav2",
+    "pycolmap",
+    "viser",
+    "nerfview==0.0.2",
+    "imageio[ffmpeg]",
+    "numpy>=1.26,<2.0",
+    "scikit-learn",
+    "tqdm",
+    "torchmetrics[image]<1.5",
+    "opencv-python",
+    "tyro>=0.8.8",
+    "Pillow",
+    "tensorboard",
+    "tensorly",
+    "pyyaml",
+    "matplotlib",
+    "torch_scatter",
+    "fused-ssim",
+    "plas",
+    "natsort",
+    "gsplat",
+    "plotly>=6.5.1",
+    "open3d>=0.19.0",
+]
+
+[tool.uv]
+override-dependencies = ["pandas>=2.2"]
+
+[tool.uv.sources]
+romav2 = { path = "RoMaV2", editable = true }
+pycolmap = { git = "https://github.com/JasonLSC/pycolmap.git" }
+fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim", rev = "1272e21a282342e89537159e4bad508b19b34157" }
+plas = { git = "https://github.com/fraunhoferhhi/PLAS.git" }
