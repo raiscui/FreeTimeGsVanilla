@@ -138,6 +138,7 @@ from datasets.FreeTime_dataset import (
     FreeTimeDataset,
     load_multiframe_colmap_points,
     load_single_frame_with_velocity,
+    load_startframe_tracked_velocity,
 )
 from utils import knn, rgb_to_sh, set_random_seed
 
@@ -238,6 +239,8 @@ class FreeTimeConfig:
     # 1. "multiframe": Use points from ALL frames with their actual times
     # 2. "single_frame": Use ONE frame's points + velocity (experimental)
     # 3. "reference": Use reference COLMAP + random times
+    # 4. "startframe": Use START frame points only, track through subsequent frames for velocity
+    #                  All points at t=0 with computed velocity (recommended for tracking)
     init_mode: str = "multiframe"
     use_velocity_init: bool = True
     velocity_npz_path: Optional[str] = None  # Pre-computed velocities (for reference mode)
@@ -331,6 +334,69 @@ def create_freetime_splats_with_optimizers(
         has_vel = vel_norms > 0.001
         print(f"[FreeTimeGS] Velocity stats: {has_vel.sum().item()}/{N} with velocity, "
               f"max={vel_norms.max():.4f}, mean={vel_norms[has_vel].mean():.4f}" if has_vel.any() else "no velocities")
+
+        # Optionally limit points
+        if cfg.max_init_points is not None and N > cfg.max_init_points:
+            print(f"[FreeTimeGS] Sampling {cfg.max_init_points} points from {N}")
+            # Prioritize points with velocity
+            vel_indices = torch.where(has_velocity)[0]
+            no_vel_indices = torch.where(~has_velocity)[0]
+
+            n_vel = min(len(vel_indices), cfg.max_init_points // 2)
+            n_no_vel = cfg.max_init_points - n_vel
+
+            if n_vel < len(vel_indices):
+                vel_sample = vel_indices[torch.randperm(len(vel_indices))[:n_vel]]
+            else:
+                vel_sample = vel_indices
+
+            if n_no_vel < len(no_vel_indices):
+                no_vel_sample = no_vel_indices[torch.randperm(len(no_vel_indices))[:n_no_vel]]
+            else:
+                no_vel_sample = no_vel_indices
+
+            sample_idx = torch.cat([vel_sample, no_vel_sample])
+            points = points[sample_idx]
+            times = times[sample_idx]
+            velocities = velocities[sample_idx]
+            rgbs = rgbs[sample_idx]
+            has_velocity = has_velocity[sample_idx]
+            N = points.shape[0]
+
+    elif cfg.init_mode == "startframe":
+        # NEW: Load points from START frame only, track through subsequent frames for velocity
+        print(f"[FreeTimeGS] Using startframe + tracked velocity initialization...")
+        print(f"[FreeTimeGS] This uses ONLY frame 0 points, tracked through frames to compute velocity")
+
+        # Get parser's transform for coordinate alignment (if normalize=True)
+        parser_transform = parser.transform if hasattr(parser, 'transform') else None
+
+        init_data = load_startframe_tracked_velocity(
+            cfg.data_dir,
+            start_frame=cfg.start_frame,
+            end_frame=cfg.end_frame,
+            frame_step=cfg.frame_step,
+            max_error=2.0,
+            match_threshold=0.1,
+            transform=parser_transform,
+        )
+
+        points = init_data['positions']
+        times = init_data['times']  # All zeros (t=0)
+        velocities = init_data['velocities']
+        rgbs = init_data['colors']
+        has_velocity = init_data['has_velocity']
+
+        N = points.shape[0]
+        print(f"[FreeTimeGS] Loaded {N} points from start frame (all at t=0)")
+        print(f"[FreeTimeGS] Points with velocity: {has_velocity.sum().item()} ({100*has_velocity.sum()/N:.1f}%)")
+
+        # Velocity statistics
+        vel_norms = velocities.norm(dim=1)
+        has_vel = vel_norms > 0.001
+        if has_vel.any():
+            print(f"[FreeTimeGS] Velocity stats: {has_vel.sum().item()}/{N} with velocity, "
+                  f"max={vel_norms.max():.4f}, mean={vel_norms[has_vel].mean():.4f}")
 
         # Optionally limit points
         if cfg.max_init_points is not None and N > cfg.max_init_points:

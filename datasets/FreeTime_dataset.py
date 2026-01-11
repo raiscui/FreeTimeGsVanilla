@@ -1126,6 +1126,210 @@ def load_single_frame_with_velocity(data_dir: str,
     return result
 
 
+def load_startframe_tracked_velocity(data_dir: str,
+                                      start_frame: int = 0,
+                                      end_frame: int = 300,
+                                      frame_step: int = 10,
+                                      max_error: float = 2.0,
+                                      match_threshold: float = 0.1,
+                                      transform: Optional[np.ndarray] = None) -> Dict[str, torch.Tensor]:
+    """
+    Load 3D points from START FRAME only and track them through subsequent frames
+    to compute velocity. This follows a pure tracking approach:
+
+    1. Load RoMa triangulated points from frame 0 (start frame)
+    2. Track those SAME points through frames 10, 20, 30, 40, 50 using KNN
+    3. Compute velocity as linear fit (displacement / time) across all observations
+    4. All points initialized at t=0 with their computed velocity
+
+    Key difference from multiframe approach:
+    - multiframe: Each frame contributes its own points at different times
+    - This approach: Only start frame points, tracked to compute velocity, all at t=0
+
+    Motion model: position(t) = position_0 + velocity * t
+
+    Args:
+        data_dir: Path to data directory
+        start_frame: First frame index (source of all points)
+        end_frame: Last frame index
+        frame_step: Frame step for tracking (e.g., 10 means track through 0, 10, 20, ...)
+        max_error: Maximum reprojection error filter
+        match_threshold: Maximum distance for KNN matching
+        transform: Optional [4, 4] transformation matrix
+
+    Returns:
+        Dictionary with positions (at t=0), times (all 0), velocities, colors, has_velocity
+    """
+    from scipy.spatial import cKDTree
+
+    sparse_dir = os.path.join(data_dir, "sparse")
+
+    # Find available COLMAP frames within range
+    frame_dirs = find_available_colmap_frames(sparse_dir, start_frame, end_frame)
+
+    # Filter by frame_step
+    if frame_step > 1:
+        frame_dirs = [(idx, path) for idx, path in frame_dirs
+                      if (idx - start_frame) % frame_step == 0]
+
+    print(f"[StartFrameTracked] Found {len(frame_dirs)} COLMAP frames with step={frame_step}")
+
+    if len(frame_dirs) < 2:
+        raise ValueError(f"Need at least 2 COLMAP frames, found {len(frame_dirs)}")
+
+    for frame_idx, path in frame_dirs:
+        print(f"  Frame {frame_idx}: {path}")
+
+    # Load START frame points (this is the source of all our Gaussians)
+    start_frame_idx, start_colmap_path = frame_dirs[0]
+    start_positions, start_colors, start_errors = _load_colmap_points(start_colmap_path)
+
+    # Filter by error
+    valid = start_errors < max_error
+    start_positions = start_positions[valid]
+    start_colors = start_colors[valid]
+
+    N = len(start_positions)
+    print(f"\n[StartFrameTracked] Start frame {start_frame_idx}: {N} points")
+
+    # Total frames for time normalization
+    total_frames = end_frame - start_frame
+
+    # Initialize tracking arrays
+    # For each point, store positions at each tracked time
+    # positions_over_time[i] = list of (time, position) tuples for point i
+    positions_over_time = [[(0.0, start_positions[i].copy())] for i in range(N)]
+
+    # Track points through subsequent frames
+    current_positions = start_positions.copy()
+    current_valid = np.ones(N, dtype=bool)  # Which points are still being tracked
+
+    for frame_idx, colmap_path in frame_dirs[1:]:
+        # Load this frame's points
+        frame_positions, _, frame_errors = _load_colmap_points(colmap_path)
+
+        valid_frame = frame_errors < max_error
+        frame_positions = frame_positions[valid_frame]
+
+        if len(frame_positions) == 0:
+            print(f"  Frame {frame_idx}: No points, stopping tracking")
+            break
+
+        # Normalized time for this frame
+        time = (frame_idx - start_frame) / max(total_frames - 1, 1)
+
+        # Build KD-tree for this frame's points
+        tree = cKDTree(frame_positions)
+
+        # Find matches for currently tracked points
+        valid_indices = np.where(current_valid)[0]
+        if len(valid_indices) == 0:
+            print(f"  Frame {frame_idx}: No points left to track")
+            break
+
+        distances, indices = tree.query(current_positions[valid_indices], k=1)
+
+        n_matched = 0
+        for local_idx, global_idx in enumerate(valid_indices):
+            if distances[local_idx] < match_threshold:
+                # Successfully tracked this point
+                matched_pos = frame_positions[indices[local_idx]]
+                positions_over_time[global_idx].append((time, matched_pos.copy()))
+                current_positions[global_idx] = matched_pos
+                n_matched += 1
+            else:
+                # Lost track of this point
+                current_valid[global_idx] = False
+
+        print(f"  Frame {frame_idx} (t={time:.3f}): Tracked {n_matched}/{len(valid_indices)} points")
+
+    # Compute velocity for each point using linear regression over tracked positions
+    velocities = np.zeros((N, 3), dtype=np.float32)
+    has_velocity = np.zeros(N, dtype=bool)
+    n_observations = np.zeros(N, dtype=int)
+
+    for i in range(N):
+        observations = positions_over_time[i]
+        n_obs = len(observations)
+        n_observations[i] = n_obs
+
+        if n_obs < 2:
+            # Not enough observations for velocity
+            continue
+
+        # Extract times and positions
+        times_obs = np.array([obs[0] for obs in observations])
+        positions_obs = np.array([obs[1] for obs in observations])
+
+        # Linear regression: position = position_0 + velocity * time
+        # Using least squares: velocity = sum((t - t_mean)(p - p_mean)) / sum((t - t_mean)^2)
+        t_mean = times_obs.mean()
+        p_mean = positions_obs.mean(axis=0)
+
+        t_diff = times_obs - t_mean
+        p_diff = positions_obs - p_mean
+
+        denom = (t_diff ** 2).sum()
+        if denom > 1e-10:
+            # velocity = sum(t_diff * p_diff) / sum(t_diff^2)
+            velocity = (t_diff[:, np.newaxis] * p_diff).sum(axis=0) / denom
+            velocities[i] = velocity
+            has_velocity[i] = True
+
+    # All points at t=0
+    times = np.zeros((N, 1), dtype=np.float32)
+
+    print(f"\n[StartFrameTracked] Velocity computation:")
+    print(f"  Total points: {N}")
+    print(f"  Points with velocity (>=2 observations): {has_velocity.sum()}")
+    print(f"  Observation counts: min={n_observations.min()}, max={n_observations.max()}, mean={n_observations.mean():.1f}")
+
+    # Apply optional coordinate transform
+    if transform is not None:
+        print(f"\n[StartFrameTracked] Applying coordinate transform...")
+        transform_t = torch.from_numpy(transform).float()
+
+        # Transform positions: p' = T @ [p; 1]
+        positions_t = torch.from_numpy(start_positions).float()
+        ones = torch.ones(len(positions_t), 1)
+        positions_h = torch.cat([positions_t, ones], dim=1)
+        positions_transformed = (transform_t @ positions_h.T).T[:, :3]
+
+        # Transform velocities: v' = R @ v (rotation only)
+        R = transform_t[:3, :3]
+        velocities_t = torch.from_numpy(velocities).float()
+        velocities_transformed = velocities_t @ R.T
+
+        result = {
+            'positions': positions_transformed,
+            'times': torch.from_numpy(times).float(),
+            'velocities': velocities_transformed,
+            'colors': torch.from_numpy(start_colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+    else:
+        result = {
+            'positions': torch.from_numpy(start_positions).float(),
+            'times': torch.from_numpy(times).float(),
+            'velocities': torch.from_numpy(velocities).float(),
+            'colors': torch.from_numpy(start_colors).float() / 255.0,
+            'has_velocity': torch.from_numpy(has_velocity).bool(),
+        }
+
+    print(f"\n[StartFrameTracked] Final: {N} points at t=0")
+    print(f"  With velocity: {result['has_velocity'].sum().item()} ({100*result['has_velocity'].sum().item()/N:.1f}%)")
+
+    vel_mags = result['velocities'].norm(dim=1)
+    has_vel = result['has_velocity']
+    if has_vel.any():
+        print(f"  Velocity magnitude: "
+              f"min={vel_mags[has_vel].min():.4f}, "
+              f"max={vel_mags[has_vel].max():.4f}, "
+              f"mean={vel_mags[has_vel].mean():.4f}")
+
+    return result
+
+
 if __name__ == "__main__":
     import argparse
 
