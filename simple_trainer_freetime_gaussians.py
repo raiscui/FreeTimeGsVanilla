@@ -46,6 +46,14 @@ point clouds from Step 1 and initializes Gaussians with their velocities.
         --start-frame=0 --end-frame=100 \\
         --max-steps=30000
 
+    # STABLE VERSION (recommended) - uses 'full' preset with tested settings
+    # Revert to this if training becomes unstable
+    CUDA_VISIBLE_DEVICES=0 uv run simple_trainer_freetime_gaussians.py full \\
+        --data-dir=/data/shared/elaheh/4D_demo/outdoor/elly/undistorted \\
+        --result-dir=/data/shared/elaheh/elly_roma \\
+        --start-frame=0 --end-frame=120 --frame-step=30 \\
+        --max-steps=50000
+
 Step 3: Monitor Training
 ------------------------
 Open TensorBoard to see training progress:
