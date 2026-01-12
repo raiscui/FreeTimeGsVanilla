@@ -220,12 +220,12 @@ class FreeTimeConfig:
 
     # Freeze temporal parameters - if True, don't train times/velocities at all
     # Just use initialized values and only train spatial appearance
-    freeze_temporal_params: bool = False  # Allow velocity learning for motion
+    freeze_temporal_params: bool = True  # Recommended: keep velocities from initialization
 
     # Velocity annealing: λt = λ0^(1-t) + λ1^t
-    # Higher velocity LR to capture motion while means LR is very low (1e-5) for stability
-    velocity_lr_start: float = 2e-2  # λ0 - higher for learning motion
-    velocity_lr_end: float = 1e-3    # λ1 - don't decay too much
+    # NOTE: Reduced from 1e-2 to 5e-3 for stability
+    velocity_lr_start: float = 5e-3  # λ0 (reduced for stability)
+    velocity_lr_end: float = 1e-4    # λ1
 
     # Rendering
     near_plane: float = 0.01
