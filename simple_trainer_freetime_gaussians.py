@@ -209,7 +209,7 @@ class FreeTimeConfig:
     # Canonical phase: treat scene as static for first N iterations
     # This helps learn basic appearance before temporal dynamics
     # During canonical phase: freeze times/durations/velocities, train only spatial params
-    canonical_phase_steps: int = 2000
+    canonical_phase_steps: int = 3000  # Increased for stability
     canonical_time: float = 0.5  # Fixed time during canonical phase (middle of sequence)
 
     # Transition phase: gradual 4D enablement after canonical
@@ -610,14 +610,18 @@ def create_freetime_splats_with_optimizers(
     # NOTE: Learning rates balance stability vs convergence speed
     # - Higher LR for scales/opacities to allow Gaussians to grow and become visible
     # - Lower LR for temporal params (times, durations, velocities) for stability
+    # Learning rates based on FreeTimeGS paper:
+    # - µx (means) should be LOW - it's the anchor position affecting ALL times
+    # - v (velocity) handles temporal motion
+    # - Appearance params (scales, opacity, SH) can be higher
     params = [
-        ("means", torch.nn.Parameter(points), 1.6e-4 * scene_scale),
+        ("means", torch.nn.Parameter(points), 1e-5 * scene_scale),  # Very low - anchor position
         ("times", torch.nn.Parameter(times), 5e-4),      # Low: time should change slowly
         ("durations", torch.nn.Parameter(durations), 5e-4),  # Low: duration should change slowly
         ("velocities", torch.nn.Parameter(velocities), cfg.velocity_lr_start),  # 5e-3, annealed
-        ("scales", torch.nn.Parameter(scales), 1e-2),    # High LR to let scales grow quickly
+        ("scales", torch.nn.Parameter(scales), 5e-3),    # Moderate for appearance
         ("quats", torch.nn.Parameter(quats), 1e-3),
-        ("opacities", torch.nn.Parameter(opacities), 2e-2),  # Higher to let opacity increase
+        ("opacities", torch.nn.Parameter(opacities), 5e-3),  # Moderate for appearance
         ("sh0", torch.nn.Parameter(colors[:, :1, :]), 2.5e-3),
         ("shN", torch.nn.Parameter(colors[:, 1:, :]), 2.5e-3 / 20),
     ]
