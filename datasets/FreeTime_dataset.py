@@ -142,53 +142,6 @@ def _detect_colmap_format(imdata) -> Literal["flat", "nested"]:
     return "flat"
 
 
-def find_available_colmap_frames(sparse_dir: str,
-                                  start_frame: int = 0,
-                                  end_frame: int = 300) -> List[Tuple[int, str]]:
-    """
-    Find all frame-specific COLMAP directories within the frame range.
-
-    Looks for directories named:
-    - frame_XXXXXX (e.g., frame_000000, frame_000060)
-
-    Args:
-        sparse_dir: Path to sparse/ directory
-        start_frame: First frame index (inclusive)
-        end_frame: Last frame index (exclusive)
-
-    Returns:
-        List of (frame_idx, colmap_path) tuples, sorted by frame index
-    """
-    frame_dirs = []
-
-    if not os.path.exists(sparse_dir):
-        return frame_dirs
-
-    for name in os.listdir(sparse_dir):
-        path = os.path.join(sparse_dir, name)
-        if not os.path.isdir(path):
-            continue
-
-        # Match frame_XXXXXX pattern
-        match = re.match(r'frame_(\d+)', name)
-        if match:
-            frame_idx = int(match.group(1))
-
-            # Check if within range
-            if frame_idx < start_frame or frame_idx >= end_frame:
-                continue
-
-            # Check if it's a valid COLMAP directory
-            if (os.path.exists(os.path.join(path, "cameras.bin")) or
-                os.path.exists(os.path.join(path, "cameras.txt"))):
-                frame_dirs.append((frame_idx, path))
-
-    # Sort by frame index
-    frame_dirs.sort(key=lambda x: x[0])
-
-    return frame_dirs
-
-
 class FreeTimeParser:
     """
     COLMAP parser for FreeTime - supports full sequence without GOP chunking.
@@ -639,6 +592,11 @@ class FreeTimeDataset:
 
         # Load image
         image_path = self._get_image_path(camera_path, frame_idx)
+
+        # Skip missing frames gracefully
+        if not os.path.exists(image_path):
+            return None
+
         image = imageio.imread(image_path)[..., :3]
         image = cv2.resize(
             image,
@@ -690,6 +648,14 @@ class FreeTimeDataset:
             data["mask"] = torch.from_numpy(mask).bool()
 
         return data
+
+
+def skip_none_collate(batch):
+    """Collate function that filters out None samples (missing frames)."""
+    batch = [x for x in batch if x is not None]
+    if len(batch) == 0:
+        return None
+    return torch.utils.data.dataloader.default_collate(batch)
 
 
 def load_multiframe_colmap_points(data_dir: str,

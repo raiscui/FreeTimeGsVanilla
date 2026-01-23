@@ -5,7 +5,8 @@ Combine Keyframes with Velocity - Efficient version for keyframe-based training
 This script:
 1. Loads only KEYFRAME point clouds (not intermediate frames)
 2. Computes velocity using the next frame (t → t+1)
-3. Outputs only keyframe data with accurate velocity vectors
+3. Optionally applies SMART IMPORTANCE SAMPLING to reduce point count
+4. Outputs keyframe data with accurate velocity vectors
 
 Why this is efficient:
 - For 300 frames with keyframe_step=5:
@@ -13,19 +14,37 @@ Why this is efficient:
   - Keyframe combine: 60 keyframes × ~800k points = ~48M points (5x smaller!)
 - Velocity is computed from consecutive pairs (t, t+1) for accuracy
 
+Smart Sampling (--use-smart-sampling):
+- Reduces 48M+ points to a budget (e.g., 6M) while preserving:
+  - Sparse background (inverse-density weighting)
+  - Moving objects (velocity-magnitude weighting)
+  - Foreground subject (center-distance weighting)
+- Voxel size auto-estimated from first frame's point cloud statistics
+
 Usage:
-    python combine_keyframes_velocity.py \
-        --input-dir /path/to/triangulation/output \
-        --output-path /path/to/keyframes_with_velocity.npz \
-        --frame-start 0 --frame-end 299 \
+    # Basic (no sampling)
+    python combine_frames_fast_keyframes.py \\
+        --input-dir /path/to/triangulation/output \\
+        --output-path /path/to/keyframes_with_velocity.npz \\
+        --frame-start 0 --frame-end 299 \\
         --keyframe-step 5
+
+    # With smart sampling (recommended for large datasets)
+    python combine_frames_fast_keyframes.py \\
+        --input-dir /path/to/triangulation/output \\
+        --output-path /path/to/keyframes_smart_6M.npz \\
+        --frame-start 0 --frame-end 299 \\
+        --keyframe-step 5 \\
+        --use-smart-sampling \\
+        --total-budget 6000000
 
 Output NPZ contains:
 - positions: [N, 3] - 3D positions from keyframes only
 - velocities: [N, 3] - velocity in meters/frame (t → t+1)
-- colors: [N, 3] - RGB colors
+- colors: [N, 3] - RGB colors (normalized to [0, 1])
 - times: [N, 1] - normalized time [0, 1]
 - durations: [N, 1] - temporal duration (auto-computed based on keyframe_step)
+- has_velocity: [N] - boolean mask for points with valid velocity
 """
 
 import numpy as np
@@ -108,6 +127,225 @@ def compute_velocity_knn(
     return velocities, valid_mask
 
 
+def estimate_scene_scale(
+    positions: np.ndarray,
+    sample_size: int = 10000,
+    k_neighbors: int = 5,
+    seed: int = 42,
+) -> dict:
+    """
+    Estimate scene scale from point cloud statistics for auto voxel size.
+
+    This function analyzes a point cloud to determine appropriate voxel size
+    for density-based sampling. It uses both local (nearest-neighbor) and
+    global (bounding box) metrics to handle different scene types.
+
+    Args:
+        positions: [N, 3] point positions (only first frame needed for speed)
+        sample_size: Number of points to sample for NN computation (default: 10000)
+        k_neighbors: Number of neighbors for NN distance (default: 5)
+        seed: Random seed for reproducible sampling
+
+    Returns:
+        dict with:
+        - bbox_diagonal: Bounding box diagonal length (meters)
+        - median_nn_dist: Median nearest-neighbor distance (local density proxy)
+        - percentile_90_nn: 90th percentile NN distance (outlier-robust)
+        - voxel_from_nn: Suggested voxel from NN (15x median)
+        - voxel_from_bbox: Suggested voxel from bbox (1.5% diagonal)
+        - suggested_voxel_size: Final recommendation (max of both, clamped to [0.01, 1.0])
+
+    Heuristics:
+        - voxel_size ~ 15x median NN distance (captures local structure)
+        - voxel_size ~ 1.5% of bbox diagonal (captures global scale)
+        - Use MAX of both to avoid over-clustering in sparse regions
+    """
+    n_points = len(positions)
+
+    if n_points == 0:
+        return {
+            'bbox_diagonal': 1.0,
+            'median_nn_dist': 0.01,
+            'suggested_voxel_size': 0.1,
+        }
+
+    # --- 1. Bounding Box Diagonal ---
+    bbox_min = positions.min(axis=0)
+    bbox_max = positions.max(axis=0)
+    bbox_diagonal = np.linalg.norm(bbox_max - bbox_min)
+
+    # --- 2. Sample-based NN Distance (for efficiency) ---
+    np.random.seed(seed)
+    if n_points > sample_size:
+        sample_idx = np.random.choice(n_points, sample_size, replace=False)
+        sample_points = positions[sample_idx]
+    else:
+        sample_points = positions
+
+    # Build KDTree and find k nearest neighbors
+    tree = cKDTree(sample_points)
+    distances, _ = tree.query(sample_points, k=k_neighbors + 1)  # +1 because first is self
+
+    # Skip self-distance (index 0), take mean of k neighbors
+    nn_distances = distances[:, 1:].mean(axis=1)
+
+    median_nn_dist = np.median(nn_distances)
+    percentile_90_nn = np.percentile(nn_distances, 90)
+
+    # --- 3. Suggested Voxel Size ---
+    # Heuristic: voxel should be large enough to contain "local neighborhoods"
+    # but small enough to distinguish density variations
+
+    # Option A: Based on local density (15x median NN distance)
+    voxel_from_nn = median_nn_dist * 15
+
+    # Option B: Based on global scale (1.5% of diagonal)
+    voxel_from_bbox = bbox_diagonal * 0.015
+
+    # Use the larger of the two (more conservative, avoids over-clustering)
+    suggested_voxel_size = max(voxel_from_nn, voxel_from_bbox)
+
+    # Clamp to reasonable range
+    suggested_voxel_size = np.clip(suggested_voxel_size, 0.01, 1.0)
+
+    return {
+        'bbox_diagonal': bbox_diagonal,
+        'bbox_min': bbox_min,
+        'bbox_max': bbox_max,
+        'median_nn_dist': median_nn_dist,
+        'percentile_90_nn': percentile_90_nn,
+        'voxel_from_nn': voxel_from_nn,
+        'voxel_from_bbox': voxel_from_bbox,
+        'suggested_voxel_size': suggested_voxel_size,
+    }
+
+
+def smart_density_velocity_sampling(
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    colors: np.ndarray,
+    target_count: int,
+    voxel_size: float = 0.05,
+    velocity_weight: float = 5.0,
+    center_weight: float = 2.0,
+    seed: int = None,
+) -> tuple:
+    """
+    Smart Importance Sampling for 4D Gaussian Splatting point clouds.
+
+    Reduces millions of points to a budget while preserving:
+    - Sparse background (inverse-density weighting)
+    - Moving objects (velocity-magnitude weighting)
+    - Foreground subject (center-distance weighting)
+
+    Algorithm:
+        1. Density via Voxel Hashing (O(N), fast):
+           - Quantize points to 3D grid cells
+           - Count points per voxel
+           - w_density = 1 / sqrt(count)  # Sparse voxels get higher weight
+
+        2. Velocity Magnitude:
+           - w_velocity = 1 + (normalized_velocity * velocity_weight)
+           - Moving points get up to (1 + velocity_weight)x boost
+
+        3. Center Focus:
+           - Distance from scene median (robust to outliers)
+           - w_center = 1 + exp(-d²/2σ²) * center_weight
+           - Points near center get up to (1 + center_weight)x boost
+
+        4. Final probability: p = w_density * w_velocity * w_center (normalized)
+
+    Args:
+        positions: [N, 3] point positions
+        velocities: [N, 3] velocity vectors (meters/frame)
+        colors: [N, 3] RGB colors
+        target_count: Number of points to sample
+        voxel_size: Grid size for density estimation (auto-estimated if None)
+        velocity_weight: Multiplier for moving points (default: 5.0)
+        center_weight: Multiplier for center/foreground (default: 2.0)
+        seed: Random seed for reproducibility
+
+    Returns:
+        Tuple of (sampled_positions, sampled_velocities, sampled_colors, selected_indices)
+    """
+    n_points = len(positions)
+
+    # If we have fewer points than budget, return all
+    if n_points <= target_count:
+        return positions, velocities, colors, np.arange(n_points)
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    # --- 1. Compute Density Weights (Voxel Hashing) ---
+    # Quantize points to integer grid cells - O(N) and much faster than KDTree
+    voxel_indices = np.floor(positions / voxel_size).astype(np.int64)
+
+    # Pack 3D coords into 1D hashable keys using spatial hashing
+    # These are large primes that reduce collision probability
+    voxel_keys = (voxel_indices[:, 0] * 73856093 ^
+                  voxel_indices[:, 1] * 19349663 ^
+                  voxel_indices[:, 2] * 83492791)
+
+    # Count points per voxel
+    unique_keys, inverse_indices, counts = np.unique(
+        voxel_keys, return_inverse=True, return_counts=True
+    )
+
+    # Assign density weight: proportional to 1 / sqrt(count)
+    # Points in dense voxels get low weight; points in sparse voxels get high weight
+    # sqrt() smooths the transition so dense areas aren't completely ignored
+    point_density_counts = counts[inverse_indices]
+    w_density = 1.0 / np.sqrt(point_density_counts.astype(np.float32))
+
+    # --- 2. Compute Velocity Weights ---
+    vel_mags = np.linalg.norm(velocities, axis=1)
+
+    # Normalize velocity to 0-1 range for weighting
+    vel_max = vel_mags.max()
+    if vel_max > 0:
+        vel_norm = vel_mags / (vel_max + 1e-6)
+    else:
+        vel_norm = np.zeros_like(vel_mags)
+
+    # Moving points get boosted probability
+    w_velocity = 1.0 + (vel_norm * velocity_weight)
+
+    # --- 3. Compute Center Focus Weights ---
+    # Use median as robust center estimate (less affected by outliers)
+    scene_center = np.median(positions, axis=0)
+    dists = np.linalg.norm(positions - scene_center, axis=1)
+
+    # Normalize distances: closer points get higher weight
+    # Use exponential falloff for soft focus
+    sigma = np.mean(dists) + 1e-6  # dynamic scale
+    w_center = np.exp(-0.5 * (dists ** 2) / (sigma ** 2))
+    w_center = 1.0 + (w_center * center_weight)
+
+    # --- 4. Combine Weights ---
+    # Total Probability Score = density × velocity × center
+    probs = w_density * w_velocity * w_center
+
+    # Normalize to sum to 1
+    probs = probs / probs.sum()
+
+    # --- 5. Sample ---
+    # Use choice with p=probs. replace=False ensures unique points.
+    selected_indices = np.random.choice(
+        n_points,
+        size=target_count,
+        replace=False,
+        p=probs
+    )
+
+    return (
+        positions[selected_indices],
+        velocities[selected_indices],
+        colors[selected_indices],
+        selected_indices
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Combine keyframes with velocity for efficient 4D training"
@@ -147,6 +385,31 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for sampling"
+    )
+    # Smart sampling arguments
+    parser.add_argument(
+        "--total-budget", type=int, default=None,
+        help="Total point budget for smart sampling (e.g., 6000000 for 6M points)"
+    )
+    parser.add_argument(
+        "--use-smart-sampling", action="store_true",
+        help="Enable smart importance sampling (inverse-density + velocity + center)"
+    )
+    parser.add_argument(
+        "--voxel-size", type=float, default=None,
+        help="Voxel size for density estimation in meters. If not set, auto-estimated from scene scale."
+    )
+    parser.add_argument(
+        "--no-auto-voxel", action="store_true",
+        help="Disable auto voxel size estimation (use fixed 0.1m if --voxel-size not provided)"
+    )
+    parser.add_argument(
+        "--velocity-weight", type=float, default=5.0,
+        help="Weight for moving points (default: 5.0 = 5x boost for fast motion)"
+    )
+    parser.add_argument(
+        "--center-weight", type=float, default=2.0,
+        help="Weight for center/foreground points (default: 2.0 = 2x boost)"
     )
 
     args = parser.parse_args()
@@ -265,6 +528,56 @@ def main():
     durations = np.concatenate(all_durations, axis=0)
     has_velocity = np.concatenate(all_has_velocity, axis=0)
 
+    n_total_before_sampling = len(positions)
+
+    # --- Pre-compute voxel size from FIRST frame only (fast!) ---
+    voxel_size = args.voxel_size
+    if args.use_smart_sampling and voxel_size is None and not args.no_auto_voxel and len(all_positions) > 0:
+        first_frame_positions = all_positions[0]
+        print(f"\n  Auto-estimating voxel size from first frame ({len(first_frame_positions):,} points)...")
+        scale_stats = estimate_scene_scale(first_frame_positions, sample_size=10000, k_neighbors=5, seed=args.seed)
+        voxel_size = scale_stats['suggested_voxel_size']
+        print(f"    Bounding box diagonal: {scale_stats['bbox_diagonal']:.3f}m")
+        print(f"    Median NN distance: {scale_stats['median_nn_dist']:.6f}m")
+        print(f"    Voxel from NN (15x): {scale_stats['voxel_from_nn']:.4f}m")
+        print(f"    Voxel from bbox (1.5%): {scale_stats['voxel_from_bbox']:.4f}m")
+        print(f"    => Auto voxel size: {voxel_size:.4f}m")
+    elif voxel_size is None:
+        voxel_size = 0.1  # Default fallback
+
+    # --- Smart Sampling (if enabled) ---
+    if args.use_smart_sampling and args.total_budget is not None and n_total_before_sampling > args.total_budget:
+        print("\n" + "=" * 70)
+        print("SMART IMPORTANCE SAMPLING")
+        print("=" * 70)
+        print(f"  Before sampling: {n_total_before_sampling:,} points")
+        print(f"  Target budget: {args.total_budget:,} points")
+        print(f"  Reduction: {n_total_before_sampling / args.total_budget:.1f}x")
+        print(f"\n  Sampling weights:")
+        print(f"    Voxel size (density): {voxel_size:.4f}m")
+        print(f"    Velocity weight: {args.velocity_weight}x (moving points boosted)")
+        print(f"    Center weight: {args.center_weight}x (foreground boosted)")
+
+        # Apply smart sampling
+        positions, velocities, colors, selected_indices = smart_density_velocity_sampling(
+            positions=positions,
+            velocities=velocities,
+            colors=colors,
+            target_count=args.total_budget,
+            voxel_size=voxel_size,
+            velocity_weight=args.velocity_weight,
+            center_weight=args.center_weight,
+            seed=args.seed,
+        )
+
+        # Also subsample times, durations, and has_velocity
+        times = times[selected_indices]
+        durations = durations[selected_indices]
+        has_velocity = has_velocity[selected_indices]
+
+        print(f"\n  After sampling: {len(positions):,} points")
+        print(f"  Points with velocity: {has_velocity.sum():,} ({100*has_velocity.sum()/len(positions):.1f}%)")
+
     # Normalize colors to [0, 1] if needed
     if colors.max() > 1.0:
         colors = colors / 255.0
@@ -274,7 +587,7 @@ def main():
     valid_vel_mag = vel_mag[has_velocity]
 
     print("\n" + "=" * 70)
-    print("STATISTICS")
+    print("FINAL STATISTICS")
     print("=" * 70)
     print(f"Total keyframes processed: {len(all_positions)}/{n_keyframes}")
     print(f"Total points: {len(positions):,}")
@@ -318,8 +631,8 @@ def main():
     print("=" * 70)
     print(f"Saved to: {output_path}")
     print(f"File size: {file_size_mb:.1f} MB")
-    print(f"\nNext step: Train with paper_efficient config:")
-    print(f"  python simple_trainer_freetime_4d_pure_relocation.py paper_efficient \\")
+    print(f"\nNext step: Train with default_keyframe config:")
+    print(f"  python src/simple_trainer_freetime_4d_pure_relocation.py default_keyframe \\")
     print(f"      --init-npz-path {output_path} \\")
     print(f"      --start-frame 0 --end-frame {total_frames}")
     print("=" * 70)

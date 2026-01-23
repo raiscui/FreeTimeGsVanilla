@@ -13,7 +13,6 @@ from .FreeTime_dataset import (
     FreeTimeDataset,
     load_multiframe_colmap_points,
     load_single_frame_with_velocity,
-    find_available_colmap_frames,
 )
 
 from .normalize import (
@@ -25,6 +24,19 @@ from .normalize import (
     compute_scene_extent,
 )
 
+from .read_write_model import (
+    read_model,
+    write_model,
+    read_cameras_binary,
+    read_images_binary,
+    read_points3D_binary,
+    read_cameras_text,
+    read_images_text,
+    read_points3D_text,
+    qvec2rotmat,
+    rotmat2qvec,
+)
+
 __all__ = [
     # Dataset classes
     "FreeTimeParser",
@@ -32,7 +44,6 @@ __all__ = [
     # Initialization functions
     "load_multiframe_colmap_points",
     "load_single_frame_with_velocity",
-    "find_available_colmap_frames",
     # Normalization functions
     "similarity_from_cameras",
     "transform_cameras",
@@ -40,4 +51,15 @@ __all__ = [
     "align_principle_axes",
     "normalize_scene",
     "compute_scene_extent",
+    # COLMAP model I/O
+    "read_model",
+    "write_model",
+    "read_cameras_binary",
+    "read_images_binary",
+    "read_points3D_binary",
+    "read_cameras_text",
+    "read_images_text",
+    "read_points3D_text",
+    "qvec2rotmat",
+    "rotmat2qvec",
 ]
