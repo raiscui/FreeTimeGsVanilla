@@ -11,20 +11,6 @@ A [gsplat](https://github.com/nerfstudio-project/gsplat)-based implementation of
 
 This implementation leverages gsplat's efficient CUDA kernels for Gaussian splatting rendering and optimization strategies (MCMC, DefaultStrategy) to train 4D Gaussians with temporal parameters (position, velocity, time, duration).
 
-## Citation
-
-If you find this work useful, please cite the original paper:
-
-```bibtex
-@InProceedings{Wang_2025_CVPR,
-    author    = {Wang, Yifan and Yang, Peishan and Xu, Zhen and Sun, Jiaming and Zhang, Zhanhua and Chen, Yong and Bao, Hujun and Peng, Sida and Zhou, Xiaowei},
-    title     = {FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic Scene Reconstruction},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2025},
-    pages     = {21750-21760}
-}
-```
 
 ## Repository Structure
 
@@ -275,6 +261,20 @@ x(t) = x + v * (t - t_canonical)
 Temporal opacity (Gaussian falloff):
 ```
 opacity(t) = exp(-0.5 * ((t - t_canonical) / duration)^2)
+```
+## Citation
+
+If you find this work useful, please cite the original paper:
+
+```bibtex
+@InProceedings{Wang_2025_CVPR,
+    author    = {Wang, Yifan and Yang, Peishan and Xu, Zhen and Sun, Jiaming and Zhang, Zhanhua and Chen, Yong and Bao, Hujun and Peng, Sida and Zhou, Xiaowei},
+    title     = {FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic Scene Reconstruction},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2025},
+    pages     = {21750-21760}
+}
 ```
 
 ## License
