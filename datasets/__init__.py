@@ -37,6 +37,16 @@ from .read_write_model import (
     rotmat2qvec,
 )
 
+from .traj import (
+    generate_interpolated_path,
+    generate_ellipse_path_z,
+    generate_ellipse_path_y,
+    generate_spiral_path,
+    generate_smooth_arc_path,
+    generate_dolly_zoom_path,
+    generate_fixed_camera_path,
+)
+
 __all__ = [
     # Dataset classes
     "FreeTimeParser",
@@ -62,4 +72,12 @@ __all__ = [
     "read_points3D_text",
     "qvec2rotmat",
     "rotmat2qvec",
+    # Trajectory generation
+    "generate_interpolated_path",
+    "generate_ellipse_path_z",
+    "generate_ellipse_path_y",
+    "generate_spiral_path",
+    "generate_smooth_arc_path",
+    "generate_dolly_zoom_path",
+    "generate_fixed_camera_path",
 ]

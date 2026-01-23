@@ -203,6 +203,155 @@ def generate_ellipse_path_y(
     return np.stack([viewmatrix(p - center, up, p) for p in positions])
 
 
+def generate_smooth_arc_path(
+    poses: np.ndarray,
+    n_frames: int = 120,
+    arc_degrees: float = 30.0,
+    height_variation: float = 0.0,
+    radius_scale: float = 1.0,
+) -> np.ndarray:
+    """
+    Generate a smooth arc camera path - gentle movement, not full 360.
+
+    Perfect for 4D scenes where you want subtle camera motion while
+    time progresses, keeping focus on the dynamic content.
+
+    Args:
+        poses: (n, 3, 4) array of input camera poses
+        n_frames: number of output frames
+        arc_degrees: total arc angle (e.g., 30 = ±15 degrees from center)
+        height_variation: vertical movement as fraction of scene scale (0-1)
+        radius_scale: scale factor for camera distance (1.0 = same as input)
+
+    Returns:
+        Array of camera poses with shape (n_frames, 3, 4)
+    """
+    # Calculate focal point (where cameras look at)
+    center = focus_point_fn(poses)
+
+    # Get average camera position and up vector
+    avg_position = poses[:, :3, 3].mean(0)
+    avg_up = poses[:, :3, 1].mean(0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+
+    # Calculate radius (distance from center to average camera position)
+    radius = np.linalg.norm(avg_position - center) * radius_scale
+
+    # Get the horizontal direction (perpendicular to up and look direction)
+    look_dir = center - avg_position
+    look_dir = look_dir / np.linalg.norm(look_dir)
+    right = np.cross(look_dir, avg_up)
+    right = right / np.linalg.norm(right)
+
+    # Height range for vertical variation
+    z_positions = poses[:, :3, 3][:, 2] if height_variation > 0 else None
+    if z_positions is not None:
+        z_range = z_positions.max() - z_positions.min()
+    else:
+        z_range = 0
+
+    # Generate arc angles (smooth sine wave for natural motion)
+    arc_rad = np.deg2rad(arc_degrees)
+    t = np.linspace(0, 1, n_frames)
+    # Smooth ease-in-out using sine
+    angles = arc_rad * np.sin(t * np.pi - np.pi/2)  # Goes from -arc to +arc smoothly
+
+    # Generate positions along the arc
+    render_poses = []
+    for i, angle in enumerate(angles):
+        # Rotate around the center point
+        # Position on arc
+        offset = right * np.sin(angle) * radius + look_dir * (np.cos(angle) - 1) * radius
+        position = avg_position + offset
+
+        # Add height variation (gentle up-down)
+        if height_variation > 0:
+            height_offset = height_variation * z_range * np.sin(t[i] * np.pi)
+            position[2] += height_offset
+
+        # Camera looks at center
+        render_poses.append(viewmatrix(center - position, avg_up, position))
+
+    return np.stack(render_poses, axis=0)
+
+
+def generate_dolly_zoom_path(
+    poses: np.ndarray,
+    n_frames: int = 120,
+    dolly_amount: float = 0.3,
+    lateral_amount: float = 0.1,
+) -> np.ndarray:
+    """
+    Generate a smooth dolly path with optional lateral movement.
+
+    Creates a gentle push-in or pull-out motion, good for dramatic reveals
+    in 4D scenes.
+
+    Args:
+        poses: (n, 3, 4) array of input camera poses
+        n_frames: number of output frames
+        dolly_amount: how much to move forward/back (fraction of scene scale)
+                      positive = push in, negative = pull out
+        lateral_amount: how much side-to-side movement (fraction of scene scale)
+
+    Returns:
+        Array of camera poses with shape (n_frames, 3, 4)
+    """
+    center = focus_point_fn(poses)
+    avg_position = poses[:, :3, 3].mean(0)
+    avg_up = poses[:, :3, 1].mean(0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+
+    # Calculate scene scale
+    radius = np.linalg.norm(avg_position - center)
+
+    # Direction vectors
+    look_dir = center - avg_position
+    look_dir = look_dir / np.linalg.norm(look_dir)
+    right = np.cross(look_dir, avg_up)
+    right = right / np.linalg.norm(right)
+
+    # Smooth parameter (0 to 1 with ease-in-out)
+    t = np.linspace(0, 1, n_frames)
+    smooth_t = (1 - np.cos(t * np.pi)) / 2  # Smooth ease-in-out
+
+    render_poses = []
+    for i in range(n_frames):
+        # Dolly movement (forward/back)
+        dolly_offset = look_dir * dolly_amount * radius * smooth_t[i]
+
+        # Lateral movement (side to side, sine wave)
+        lateral_offset = right * lateral_amount * radius * np.sin(t[i] * 2 * np.pi)
+
+        position = avg_position + dolly_offset + lateral_offset
+        render_poses.append(viewmatrix(center - position, avg_up, position))
+
+    return np.stack(render_poses, axis=0)
+
+
+def generate_fixed_camera_path(
+    poses: np.ndarray,
+    n_frames: int = 120,
+    camera_index: int = 0,
+) -> np.ndarray:
+    """
+    Generate a static camera path (same pose repeated).
+
+    Useful for 4D scenes where you want to see time progression
+    from a fixed viewpoint.
+
+    Args:
+        poses: (n, 3, 4) array of input camera poses
+        n_frames: number of output frames
+        camera_index: which input camera to use (0 = first, -1 = last)
+
+    Returns:
+        Array of camera poses with shape (n_frames, 3, 4)
+    """
+    selected_pose = poses[camera_index]
+    return np.tile(selected_pose[np.newaxis, :, :], (n_frames, 1, 1))
+
+
 def generate_interpolated_path(
     poses: np.ndarray,
     n_interp: int,

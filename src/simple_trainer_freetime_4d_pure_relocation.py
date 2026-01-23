@@ -509,8 +509,21 @@ class Config:
     """Use antialiased rasterization mode."""
 
     # ==================== Trajectory Rendering ====================
-    render_traj_path: str = "interp"
-    """Trajectory type: 'interp' for smooth spline through camera poses."""
+    render_traj_path: str = "arc"
+    """Trajectory type:
+    - 'arc': Gentle arc movement (±15 degrees), good for 4D time-focused videos (default)
+    - 'interp': Smooth spline interpolation through all camera poses
+    - 'dolly': Smooth push-in/pull-out with subtle lateral movement
+    - 'fixed': Static camera (first training camera), pure time progression
+    - 'ellipse_z': Full ellipse in XY plane
+    - 'ellipse_y': Full ellipse in XZ plane
+    """
+
+    render_traj_arc_degrees: float = 30.0
+    """Arc angle in degrees for 'arc' trajectory (total sweep, e.g., 30 = ±15 from center)."""
+
+    render_traj_dolly_amount: float = 0.2
+    """Dolly amount for 'dolly' trajectory (fraction of scene scale, positive = push in)."""
 
     render_traj_n_frames: int = 120
     """Number of frames in the trajectory video."""
@@ -2756,14 +2769,51 @@ class FreeTime4DRunner:
 
         print(f"  Smart sampling: {n_video_frames} video frames (time range [{time_start:.3f}, {time_end:.3f}])")
 
-        # Generate smooth camera trajectory through poses
-        n_interp = max(1, n_camera_frames // max(len(camtoworlds_34) - 1, 1))
-        traj_poses = generate_interpolated_path(camtoworlds_34, n_interp)  # [M, 3, 4]
-        # Subsample to exactly n_camera_frames
-        if len(traj_poses) > n_camera_frames:
-            indices = np.linspace(0, len(traj_poses) - 1, n_camera_frames, dtype=int)
-            traj_poses = traj_poses[indices]
-        print(f"  Trajectory: smooth interpolation through {len(traj_poses)} camera poses")
+        # Generate camera trajectory based on selected type
+        from datasets.traj import (
+            generate_smooth_arc_path,
+            generate_dolly_zoom_path,
+            generate_fixed_camera_path,
+            generate_ellipse_path_z,
+            generate_ellipse_path_y,
+        )
+
+        traj_type = cfg.render_traj_path.lower()
+        if traj_type == "arc":
+            traj_poses = generate_smooth_arc_path(
+                camtoworlds_34,
+                n_frames=n_camera_frames,
+                arc_degrees=cfg.render_traj_arc_degrees,
+            )
+            print(f"  Trajectory: smooth arc (±{cfg.render_traj_arc_degrees/2:.0f}°) with {len(traj_poses)} poses")
+        elif traj_type == "dolly":
+            traj_poses = generate_dolly_zoom_path(
+                camtoworlds_34,
+                n_frames=n_camera_frames,
+                dolly_amount=cfg.render_traj_dolly_amount,
+            )
+            print(f"  Trajectory: dolly zoom ({cfg.render_traj_dolly_amount:.0%} push) with {len(traj_poses)} poses")
+        elif traj_type == "fixed":
+            traj_poses = generate_fixed_camera_path(
+                camtoworlds_34,
+                n_frames=n_camera_frames,
+                camera_index=0,
+            )
+            print(f"  Trajectory: fixed camera (static viewpoint) with {len(traj_poses)} poses")
+        elif traj_type == "ellipse_z":
+            traj_poses = generate_ellipse_path_z(camtoworlds_34, n_frames=n_camera_frames)
+            print(f"  Trajectory: ellipse (XY plane) with {len(traj_poses)} poses")
+        elif traj_type == "ellipse_y":
+            traj_poses = generate_ellipse_path_y(camtoworlds_34, n_frames=n_camera_frames)
+            print(f"  Trajectory: ellipse (XZ plane) with {len(traj_poses)} poses")
+        else:  # "interp" or default
+            n_interp = max(1, n_camera_frames // max(len(camtoworlds_34) - 1, 1))
+            traj_poses = generate_interpolated_path(camtoworlds_34, n_interp)  # [M, 3, 4]
+            # Subsample to exactly n_camera_frames
+            if len(traj_poses) > n_camera_frames:
+                indices = np.linspace(0, len(traj_poses) - 1, n_camera_frames, dtype=int)
+                traj_poses = traj_poses[indices]
+            print(f"  Trajectory: smooth interpolation through {len(traj_poses)} camera poses")
 
         # Convert to [N, 4, 4] by adding homogeneous row
         traj_poses_44 = np.concatenate([
