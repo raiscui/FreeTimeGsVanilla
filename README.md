@@ -1,8 +1,30 @@
 # FreeTimeGS - 4D Gaussian Splatting
 
-A complete implementation of 4D Gaussian Splatting for dynamic scene reconstruction.
-
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+A [gsplat](https://github.com/nerfstudio-project/gsplat)-based implementation of **FreeTimeGS** for dynamic scene reconstruction.
+
+> **FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic Scene Reconstruction**
+> Yifan Wang, Peishan Yang, Zhen Xu, Jiaming Sun, Zhanhua Zhang, Yong Chen, Hujun Bao, Sida Peng, Xiaowei Zhou
+> CVPR 2025
+> [[Paper]](https://openaccess.thecvf.com/content/CVPR2025/papers/Wang_FreeTimeGS_Free_Gaussian_Primitives_at_Anytime_Anywhere_for_Dynamic_Scene_CVPR_2025_paper.pdf) [[Project Page]](https://freetime-gs.github.io/)
+
+This implementation leverages gsplat's efficient CUDA kernels for Gaussian splatting rendering and optimization strategies (MCMC, DefaultStrategy) to train 4D Gaussians with temporal parameters (position, velocity, time, duration).
+
+## Citation
+
+If you find this work useful, please cite the original paper:
+
+```bibtex
+@InProceedings{Wang_2025_CVPR,
+    author    = {Wang, Yifan and Yang, Peishan and Xu, Zhen and Sun, Jiaming and Zhang, Zhanhua and Chen, Yong and Bao, Hujun and Peng, Sida and Zhou, Xiaowei},
+    title     = {FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic Scene Reconstruction},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2025},
+    pages     = {21750-21760}
+}
+```
 
 ## Repository Structure
 
