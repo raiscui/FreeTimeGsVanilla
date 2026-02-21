@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+    "settings": {
+        "workbench.colorCustomizations": {
+            "activityBar.activeBackground": "#6fe73b",
+            "activityBar.background": "#6fe73b",
+            "activityBar.foreground": "#15202b",
+            "activityBar.inactiveForeground": "#15202b99",
+            "activityBarBadge.background": "#5582ea",
+            "activityBarBadge.foreground": "#15202b",
+            "sash.hoverBorder": "#6fe73b"
+        },
+        "peacock.remoteColor": "#53d51a"
+    }
+}

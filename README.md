@@ -251,16 +251,20 @@ After training, you'll find:
 ```
 results/
 ├── ckpts/
-│   └── ckpt_30000.pt              # Model checkpoint
+│   └── ckpt_29999.pt              # Model checkpoint
 ├── videos/
-│   ├── traj_4d_step30000.mp4      # RGB trajectory video
-│   ├── traj_duration_step30000.mp4    # Duration heatmap
-│   └── traj_velocity_step30000.mp4    # Velocity heatmap
-├── ply_sequence_step30000/
+│   ├── traj_4d_step29999.mp4      # RGB trajectory video
+│   ├── traj_duration_step29999.mp4    # Duration heatmap
+│   └── traj_velocity_step29999.mp4    # Velocity heatmap
+├── ply_sequence_step29999/
 │   ├── frame_000000.ply           # Per-frame PLY exports
 │   └── ...
 └── tb/                            # TensorBoard logs
 ```
+
+Note:
+- 训练 step 在代码里是 0-based.
+- 例如你跑 `--max-steps 30000`,最终 step 会是 29999,因此文件名会是 `ckpt_29999.pt`.
 
 ## 4D Viewer
 
@@ -290,7 +294,7 @@ python -c "import viser; import nerfview; import gsplat; print('All dependencies
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/viewer_4d.py \
-    --ckpt /path/to/results/ckpts/ckpt_30000.pt \
+    --ckpt /path/to/results/ckpts/ckpt_29999.pt \
     --port 8080 \
     --total-frames 60 \
     --temporal-threshold 0.05 \
@@ -422,13 +426,13 @@ The viewer uses multi-level filtering for efficient rendering:
 
 **Basic viewing:**
 ```bash
-python src/viewer_4d.py --ckpt results/ckpts/ckpt_30000.pt --total-frames 60
+python src/viewer_4d.py --ckpt results/ckpts/ckpt_29999.pt --total-frames 60
 ```
 
 **High-quality (show more Gaussians):**
 ```bash
 python src/viewer_4d.py \
-    --ckpt results/ckpts/ckpt_30000.pt \
+    --ckpt results/ckpts/ckpt_29999.pt \
     --total-frames 60 \
     --temporal-threshold 0.01 \
     --spatial-percentile 99
@@ -437,7 +441,7 @@ python src/viewer_4d.py \
 **Fast preview (fewer Gaussians):**
 ```bash
 python src/viewer_4d.py \
-    --ckpt results/ckpts/ckpt_30000.pt \
+    --ckpt results/ckpts/ckpt_29999.pt \
     --total-frames 60 \
     --temporal-threshold 0.1 \
     --spatial-percentile 90
@@ -446,7 +450,7 @@ python src/viewer_4d.py \
 **Debug mode (no filtering):**
 ```bash
 python src/viewer_4d.py \
-    --ckpt results/ckpts/ckpt_30000.pt \
+    --ckpt results/ckpts/ckpt_29999.pt \
     --total-frames 60 \
     --no-spatial-filter \
     --temporal-threshold 0.0

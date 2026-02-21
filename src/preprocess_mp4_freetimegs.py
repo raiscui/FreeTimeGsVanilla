@@ -30,6 +30,15 @@ import imageio.v2 as imageio
 import numpy as np
 import torch
 
+# -----------------------------------------------------------------------------
+# 允许直接用 `python src/preprocess_mp4_freetimegs.py` 运行.
+# - Python 默认只把脚本所在目录(src/)加入 sys.path,会导致 `import datasets` 失败.
+# - 因此这里显式把仓库根目录加入 sys.path,保持与 trainer 脚本一致的可运行性.
+# -----------------------------------------------------------------------------
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from datasets.read_write_model import read_model
 
 
@@ -338,7 +347,10 @@ def _ensure_symlink(src: Path, dst: Path) -> None:
     """创建 symlink(已存在则覆盖)."""
     if dst.exists() or dst.is_symlink():
         dst.unlink()
-    dst.symlink_to(src)
+    # 统一用绝对路径,避免 src 是相对路径时生成“断链”.
+    # 例如 dst 在 work_dir/colmap_ref/images 下,src 若是 `results/.../data/images/...`,
+    # symlink 会被解释成 dst_dir/results/.../data/images/...,从而 COLMAP 读不到图像.
+    dst.symlink_to(src.resolve())
 
 
 def _prepare_colmap_reference(
@@ -385,6 +397,9 @@ def _run_colmap_mapper(
     colmap_images_dir: Path,
     colmap_ref_dir: Path,
     camera_model: str,
+    sift_num_threads: int,
+    sift_max_image_size: int,
+    match_num_threads: int,
 ) -> Path:
     """
     在 colmap_ref_dir 下运行:
@@ -394,11 +409,21 @@ def _run_colmap_mapper(
 
     返回 sparse/0 的路径.
     """
-    database_path = colmap_ref_dir / "database.db"
-    sparse_dir = colmap_ref_dir / "sparse"
+    # 备注:
+    # - 这里统一用绝对路径,避免 cwd 变化导致的"路径二次拼接"问题.
+    # - 例如 cwd=colmap_ref_dir 时,再传入 `results/.../colmap_ref/database.db` 会被解释成
+    #   `colmap_ref/results/.../colmap_ref/database.db`,从而触发 COLMAP 的 options check 失败.
+    database_path = (colmap_ref_dir / "database.db").resolve()
+    sparse_dir = (colmap_ref_dir / "sparse").resolve()
+    colmap_images_dir_abs = colmap_images_dir.resolve()
+
+    # mapper 要求 output_path 是已存在的目录.
+    sparse_dir.mkdir(parents=True, exist_ok=True)
 
     # 备注:
     # - apt 的 colmap 常见是无 CUDA,因此 use_gpu=0.
+    # - 对于高分辨率图片,默认的多线程 SIFT 会非常吃内存,容易被 OOM killer 杀掉.
+    #   因此这里默认把线程数和 max_image_size 都压低到一个更稳的值,确保能开箱跑通.
     _run_cmd(
         [
             "colmap",
@@ -406,13 +431,17 @@ def _run_colmap_mapper(
             "--database_path",
             str(database_path),
             "--image_path",
-            str(colmap_images_dir),
+            str(colmap_images_dir_abs),
             "--ImageReader.camera_model",
             camera_model,
             "--SiftExtraction.use_gpu",
             "0",
+            "--SiftExtraction.num_threads",
+            str(int(sift_num_threads)),
+            "--SiftExtraction.max_image_size",
+            str(int(sift_max_image_size)),
         ],
-        cwd=colmap_ref_dir,
+        cwd=colmap_ref_dir.resolve(),
     )
     _run_cmd(
         [
@@ -422,8 +451,10 @@ def _run_colmap_mapper(
             str(database_path),
             "--SiftMatching.use_gpu",
             "0",
+            "--SiftMatching.num_threads",
+            str(int(match_num_threads)),
         ],
-        cwd=colmap_ref_dir,
+        cwd=colmap_ref_dir.resolve(),
     )
     _run_cmd(
         [
@@ -432,11 +463,11 @@ def _run_colmap_mapper(
             "--database_path",
             str(database_path),
             "--image_path",
-            str(colmap_images_dir),
+            str(colmap_images_dir_abs),
             "--output_path",
             str(sparse_dir),
         ],
-        cwd=colmap_ref_dir,
+        cwd=colmap_ref_dir.resolve(),
     )
 
     sparse0 = sparse_dir / "0"
@@ -504,7 +535,21 @@ def _triangulate_all_frames(
     # 初始化 RoMA 模型(一次即可)
     # -----------------------------
     torch_device = torch.device(device)
-    roma_model = roma_outdoor(device=torch_device)
+    # 说明:
+    # - romatch 默认 use_custom_corr=True,会依赖自定义 CUDA 扩展 `local_corr`.
+    # - 该扩展在很多环境里并不会自动安装成功,会导致 match 阶段直接报
+    #   `ModuleNotFoundError: No module named 'local_corr'`.
+    # - 为了让 pipeline 开箱即用,这里做一次自动降级:
+    #   - 能 import local_corr -> 用自定义实现(更快)
+    #   - 否则 -> use_custom_corr=False(纯 PyTorch,更慢但可跑通)
+    use_custom_corr = True
+    try:
+        import local_corr  # noqa: F401
+    except Exception:
+        use_custom_corr = False
+        print("[RoMA] 未检测到 local_corr,自动设置 use_custom_corr=False(可能更慢,但更稳定).")
+
+    roma_model = roma_outdoor(device=torch_device, use_custom_corr=use_custom_corr)
     roma_model.symmetric = False
 
     print(f"[RoMA] device={device}, anchor={anchor_name}, others={other_names}")
@@ -641,6 +686,24 @@ def main() -> None:
 
     # COLMAP 参数
     parser.add_argument("--colmap-camera-model", type=str, default="OPENCV", help="COLMAP ImageReader.camera_model")
+    parser.add_argument(
+        "--colmap-sift-num-threads",
+        type=int,
+        default=1,
+        help="COLMAP SiftExtraction.num_threads(高分辨率下建议 1-2,避免 OOM)",
+    )
+    parser.add_argument(
+        "--colmap-sift-max-image-size",
+        type=int,
+        default=2000,
+        help="COLMAP SiftExtraction.max_image_size(高分辨率下建议 <=2000,降低内存占用)",
+    )
+    parser.add_argument(
+        "--colmap-match-num-threads",
+        type=int,
+        default=1,
+        help="COLMAP SiftMatching.num_threads(默认 1,避免 CPU/RAM 压力过大)",
+    )
 
     args = parser.parse_args()
 
@@ -710,6 +773,9 @@ def main() -> None:
         colmap_images_dir=colmap_images_dir,
         colmap_ref_dir=colmap_ref_dir,
         camera_model=args.colmap_camera_model,
+        sift_num_threads=args.colmap_sift_num_threads,
+        sift_max_image_size=args.colmap_sift_max_image_size,
+        match_num_threads=args.colmap_match_num_threads,
     )
 
     data_sparse0 = _copy_sparse0_to_data_dir(

@@ -17,7 +17,7 @@
 - `triangulation_dir/points3d_frame%06d.npy`: 每帧三角化点云(世界坐标).
 - `triangulation_dir/colors_frame%06d.npy`: 每帧点云颜色(从 anchor 相机采样).
 - `init_npz_path`: combine 后的初始化 NPZ(全帧 positions/colors/times/velocities/durations).
-- `result_dir/ckpts/ckpt_30000.pt`: 训练产物 checkpoint.
+- `result_dir/ckpts/ckpt_29999.pt`: 训练产物 checkpoint(注意: step 0-based,当 `max_steps=30000` 时最终 step=29999).
 - `result_dir/videos/*.mp4`: 训练过程导出的渲染视频(用于快速验证).
 
 ## 关键约定(必须一致)
@@ -47,7 +47,7 @@ flowchart LR
   Images --> Train
   Sparse0 --> Train
 
-  Train --> Ckpt["ckpt_30000.pt"]
+  Train --> Ckpt["ckpt_29999.pt"]
   Train --> Videos["videos/*.mp4"]
 ```
 
