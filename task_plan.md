@@ -327,3 +327,59 @@
     - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k.sog4d`
   - 全量导出(61 帧 + 133 万 splats):
     - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d`(约 1.1G)
+
+
+# 任务计划: `.sog4d` exporter 支持 bands>0(SH rest, delta-v1)
+
+## 目标
+1. 扩展 `tools/exportor/export_sog4d.py`,在 `--sh-bands > 0` 时导出 SH rest:
+   - 写入 palette(centroids): `shN_centroids.bin`(little-endian,f16/f32).
+   - 写入 labels:
+     - base labels: `frames/00000/shN_labels.webp`(u16 label,RG 小端).
+     - delta: `sh/shN_delta_00000.bin`(delta-v1,覆盖 [0,frameCount)).
+2. 用扩展后的 exporter,把:
+   - `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+   再导出一份带 SH rest 的 `.sog4d`(建议新文件名避免覆盖 bands=0 版本).
+
+## 阶段
+- [x] 阶段1: 计划与规格复读(spec/importer 约束)
+- [x] 阶段2: 实现 SH rest(v1 + delta-v1)
+- [x] 阶段3: 冒烟导出与自检(meta/zip 内容)
+- [x] 阶段4: 全量导出(61 帧)并记录产物路径
+- [ ] 阶段5: 文档与提交(四文件回写 + git commit)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(更高质量/压缩更好)
+- 采用 `meta.json.version=2` 的 per-band palette:
+  - `sh1/sh2/sh3` 分别拟合 codebook + labels(delta-v1).
+  - 优点: 单个向量维度更低(9/15/21),聚类更稳,同等 labelCount 下通常误差更小.
+  - 代价: 实现与 bundle 文件数量更多.
+
+### 方向B: 先能用,后面再优雅(本次落地)
+- 采用 `meta.json.version=1` 的单一 shN palette:
+  - `shN_centroids.bin` + `shN_labels.webp` + `delta-v1`.
+  - 优点: 实现最直接,先把链路跑通.
+  - 代价: 向量维度较高(最多 45),同等 K 下误差可能更大;后续可再升级到方向A.
+
+## 做出的决定
+- [2026-02-21 09:37:04 UTC] 先落地方向B: v1 + delta-v1.
+  - 理由: 你已经确认"SH 通常静态",delta-v1 几乎是零成本压缩.
+  - 后续: 若 Unity 侧对 SH 质量要求更高,再升级实现方向A(v2).
+
+## 关键问题
+1. checkpoint 的 `shN` 系数通常是静态的,因此 delta-v1 预计每帧 `updateCount=0`.
+2. `.sog4d` 要求 frame-to-frame splat identity 稳定.
+   - labels 的裁剪必须是“全局裁剪”,不能每帧裁剪.
+3. KMeans 计算成本可能成为瓶颈,需要提供采样与 chunk 参数避免内存/时间爆炸.
+
+## 状态
+**目前在阶段5**: 已完成全量导出,准备做回写与 git 提交.
+
+## 状态更新
+- [2026-02-21 09:43:10 UTC] 已完成实现与冒烟导出:
+  - exporter: `tools/exportor/export_sog4d.py` 新增 `--sh-bands 1..3`(v1: `shN_centroids.bin` + labels + delta-v1).
+  - 冒烟产物(5 帧 + 5 万 splats, bands=3, delta-v1):
+    - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k_sh3_v1delta.sog4d`
+- [2026-02-21 09:45:50 UTC] 已完成全量导出(61 帧 + 133 万 splats, bands=3, shNCount=512, delta-v1):
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d`

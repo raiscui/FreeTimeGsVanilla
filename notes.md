@@ -213,3 +213,36 @@ python tools/exportor/export_sog4d.py \
 ### 快速冒烟(更快,用于验证工具链)
 - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k.sog4d`
 - 参数: `--frame-count 5 --max-splats 50000 --layout-width 1024`
+
+
+## 2026-02-21 09:45:50 UTC 追加: `.sog4d` exporter 支持 SH rest(bands>0, v1 + delta-v1)
+
+### 新增能力
+- `tools/exportor/export_sog4d.py` 新增参数:
+  - `--sh-bands 0..3`
+  - `--shn-count`(v1 palette 的码字数)
+  - `--shn-centroids-type f16|f32`
+  - `--shn-labels-encoding full|delta-v1`(默认 delta-v1)
+- 当 `--sh-bands > 0` 时,会额外写入:
+  - `shN_centroids.bin`: little-endian 的 `float16/float32`,无 header.
+  - `frames/00000/shN_labels.webp`: u16 labels 的 RG 小端数据图.
+  - `sh/shN_delta_00000.bin`: delta-v1.由于 FreeTimeGS 的 SH 通常静态,每帧 `updateCount=0`,因此 delta 文件极小.
+
+### 默认值调整(让大数据更稳)
+- `--shn-count` 默认 512(而不是 4096).
+- `--shn-codebook-sample` 默认 100k,`--shn-kmeans-iters` 默认 10.
+  - 原因: scipy 的 `kmeans2` 属于 CPU 侧实现,K 和 sample 过大时会非常慢甚至不可用.
+  - 需要更高质量时,可以手动调大这些参数,但要预期导出耗时显著增加.
+
+### 实际导出(你指定的 ckpt,含 SH rest)
+- 冒烟(5 帧 + 5 万 splats, bands=3):
+  - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k_sh3_v1delta.sog4d`
+- 全量(61 帧 + 133 万 splats, bands=3, shNCount=512):
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d`
+
+### 你问的两个 ckpt 的区别(核心是 Gaussian 数量不同)
+- `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`:
+  - `n_gaussians=1,335,131`(文件约 978MB)
+- `results/bar-release_result_run2/ckpts/ckpt_29999.pt`:
+  - `n_gaussians=199,958`(文件约 147MB)
+- 两者 step 都是 29999,但训练时的初始化/采样密度不同,导致最终点数差距很大.

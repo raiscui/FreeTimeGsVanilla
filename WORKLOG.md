@@ -80,3 +80,26 @@
 - 已完成对你指定 checkpoint 的导出:
   - 输入: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
   - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d`(约 1.1G)
+
+## 2026-02-21 09:45:50 UTC
+- 扩展 `.sog4d` exporter 支持导出 SH rest(bands>0):
+  - `tools/exportor/export_sog4d.py` 新增 `--sh-bands 1..3`,实现 v1: `shN_centroids.bin` + labels(WebP) + delta-v1.
+  - 默认用 `delta-v1`(FreeTimeGS 的 SH 通常静态,delta 文件基本全是 `updateCount=0`).
+- 已完成对同一 checkpoint 的“含 SH rest”全量导出:
+  - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d`
+
+复现命令:
+```bash
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output-path results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d \
+  --frame-count 61 \
+  --layout-width 2048 \
+  --sh-bands 3 \
+  --shn-count 512 \
+  --shn-labels-encoding delta-v1 \
+  --webp-method 0 \
+  --zip-compression stored \
+  --overwrite
+```

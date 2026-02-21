@@ -16,11 +16,13 @@
 - 如果后续需要更快的抽帧,可以给预处理脚本增加 ffmpeg 抽帧选项(比 OpenCV 更快,也更容易做 trim/crop/hdr/lut).
 
 ## 2026-02-21 09:19:20 UTC
-- `.sog4d` exporter 当前只实现了 `bands=0`(sh0+opacity).
-  - 后续可按 `tools/exportor/spec.md` + `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 增量实现 `bands>0` 的 SH rest:
-    - v1: 单一 `shN` palette + labels(full/delta-v1).
-    - v2: per-band(`sh1/sh2/sh3`) palette + labels(推荐,压缩更好).
 - 建议补一个 exporter 的 `--self-check`:
   - 校验 `layout.width*height >= splatCount`.
   - 校验 per-frame 文件存在性与尺寸(抽样验证 1-2 帧即可).
   - 校验 `meta.json.streams.*` 关键字段长度与 frameCount 一致.
+
+## 2026-02-21 09:45:50 UTC
+- `.sog4d` exporter 后续可升级实现 `meta.json.version=2` 的 per-band palette:
+  - `sh1/sh2/sh3` 分别拟合 codebook + labels(delta-v1),质量与码率通常更好.
+- scipy `kmeans2` 可能出现 empty cluster 的 warning:
+  - 可考虑增加 retry(重采样/换 seed)或 fallback(自动降 `shn_count`),让默认行为更“稳”.

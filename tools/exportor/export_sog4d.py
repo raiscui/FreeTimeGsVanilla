@@ -28,6 +28,7 @@ import argparse
 import json
 import math
 import os
+import struct
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -307,6 +308,21 @@ class ScaleCodebookResult:
     indices_u16: np.ndarray  # [N] u16
 
 
+@dataclass(frozen=True)
+class ShNCodebookResult:
+    """
+    SH rest(v1) 的 palette + labels 结果.
+
+    约束:
+    - `labels_u16` 的取值范围必须满足 `[0, shn_count)`.
+    - `centroids_f32` 的维度必须等于 `rest_coeff_count * 3`.
+    """
+
+    rest_coeff_count: int
+    centroids_f32: np.ndarray  # [K,D] float32, D=rest_coeff_count*3
+    labels_u16: np.ndarray  # [N] u16
+
+
 def _build_scale_codebook(
     scale_log: np.ndarray,
     *,
@@ -352,6 +368,156 @@ def _build_scale_codebook(
 
     codebook_lin = np.exp(centroids).astype(np.float32)
     return ScaleCodebookResult(codebook_lin=codebook_lin, indices_u16=indices)
+
+
+def _flatten_sh_rest_v1(
+    shn: np.ndarray,
+    *,
+    bands: int,
+) -> Tuple[np.ndarray, int]:
+    """
+    把 checkpoint 的 `shN[N,K,3]` 按 v1 规则展平成 `[N, restCoeffCount*3]`.
+
+    备注:
+    - `bands` 决定 restCoeffCount:
+      restCoeffCount = (bands + 1)^2 - 1
+    - 这里假设 `shN` 的 coeff 顺序已经与 Unity importer 对齐(通常是 l 从小到大).
+    """
+    if not (1 <= bands <= 3):
+        raise ValueError(f"bands must be in [1,3], got {bands}")
+
+    shn = shn.astype(np.float32, copy=False)
+    n = int(shn.shape[0])
+    if shn.ndim != 3 or shn.shape[0] != n or shn.shape[2] != 3:
+        raise ValueError(f"shN must be [N,K,3], got shape={shn.shape}")
+
+    rest_coeff_count = int((bands + 1) ** 2 - 1)
+    if shn.shape[1] < rest_coeff_count:
+        raise ValueError(
+            f"shN coeff count too small: need >= {rest_coeff_count}, got {shn.shape[1]}"
+        )
+
+    # 注意: [:, :rest_coeff_count, :] 从 0 开始取连续前缀,通常不会触发额外拷贝.
+    sh_rest = shn[:, :rest_coeff_count, :]
+    sh_rest_flat = sh_rest.reshape(n, rest_coeff_count * 3)
+    return sh_rest_flat, rest_coeff_count
+
+
+def _build_shn_v1_codebook_and_labels(
+    sh_rest_flat: np.ndarray,
+    *,
+    shn_count: int,
+    sample_size: int,
+    seed: int,
+    assign_chunk: int,
+    kmeans_iters: int,
+) -> ShNCodebookResult:
+    """
+    v1: 用单一 palette 量化 SH rest.
+
+    实现要点:
+    - 先对 `sh_rest_flat` 做 kmeans2 得到 centroids.
+    - 再用 KDTree 为全量 splat 分配 labels(u16).
+    """
+    if not (1 <= shn_count <= 65535):
+        raise ValueError(f"--shn-count must be in [1,65535], got {shn_count}")
+    if sample_size <= 0:
+        raise ValueError(f"--shn-codebook-sample must be > 0, got {sample_size}")
+    if assign_chunk <= 0:
+        raise ValueError(f"--shn-assign-chunk must be > 0, got {assign_chunk}")
+    if kmeans_iters <= 0:
+        raise ValueError(f"--shn-kmeans-iters must be > 0, got {kmeans_iters}")
+
+    x = sh_rest_flat.astype(np.float32, copy=False)
+    n = int(x.shape[0])
+    d = int(x.shape[1])
+    if x.shape != (n, d):
+        raise ValueError("internal error: sh_rest_flat shape mismatch")
+    if d % 3 != 0:
+        raise ValueError(f"internal error: sh_rest_flat dim must be multiple of 3, got {d}")
+
+    rest_coeff_count = d // 3
+
+    rng = np.random.default_rng(int(seed))
+    sample_n = min(int(sample_size), n)
+    sample_idx = rng.choice(n, size=sample_n, replace=False)
+    sample = x[sample_idx]
+
+    print(f"[sog4d] shN kmeans: sample={sample_n:,}, K={shn_count}, D={d}")
+    centroids, _ = kmeans2(sample, int(shn_count), iter=int(kmeans_iters), minit="points")
+    centroids_f32 = centroids.astype(np.float32, copy=False)
+
+    # 高维数据 KDTree 可能会退化,但在 K 不太大时仍然是最省内存的稳妥做法.
+    tree = cKDTree(centroids_f32)
+    labels = np.empty((n,), dtype=np.uint16)
+    for start in range(0, n, int(assign_chunk)):
+        end = min(start + int(assign_chunk), n)
+        _, idx = tree.query(x[start:end], k=1, workers=-1)
+        labels[start:end] = idx.astype(np.uint16)
+
+    return ShNCodebookResult(
+        rest_coeff_count=int(rest_coeff_count),
+        centroids_f32=centroids_f32,
+        labels_u16=labels,
+    )
+
+
+def _make_rgba_image_from_u16_labels(
+    labels_u16: np.ndarray,
+    *,
+    pixel_count: int,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """
+    把 u16 labels 写成 RGBA8 WebP 数据图:
+    - RG: label 的小端(u16)
+    - B: 0
+    - A: 255
+    """
+    labels_u16 = labels_u16.astype(np.uint16, copy=False)
+    n = int(labels_u16.shape[0])
+    if labels_u16.shape != (n,):
+        raise ValueError(f"labels_u16 must be [N], got {labels_u16.shape}")
+
+    flat = np.zeros((pixel_count, 4), dtype=np.uint8)
+    flat[:, 3] = np.uint8(255)
+    flat[:n, 0] = (labels_u16 & np.uint16(255)).astype(np.uint8)
+    flat[:n, 1] = (labels_u16 >> np.uint16(8)).astype(np.uint8)
+    return flat.reshape(height, width, 4)
+
+
+def _build_label_delta_v1_static(
+    *,
+    segment_start_frame: int,
+    segment_frame_count: int,
+    splat_count: int,
+    label_count: int,
+) -> bytes:
+    """
+    生成 delta-v1 的最小实现: segment 内所有后续帧都无更新(updateCount=0).
+
+    这非常贴合 FreeTimeGS 的常见性质: SH 系数通常静态,labels 跨帧一致.
+    """
+    if segment_start_frame < 0:
+        raise ValueError("segment_start_frame must be >= 0")
+    if segment_frame_count <= 0:
+        raise ValueError("segment_frame_count must be > 0")
+    if splat_count <= 0:
+        raise ValueError("splat_count must be > 0")
+    if not (1 <= label_count <= 65535):
+        raise ValueError("label_count must be in [1,65535]")
+
+    header = b"SOG4DLB1" + struct.pack(
+        "<5I",
+        1,  # version
+        int(segment_start_frame),
+        int(segment_frame_count),
+        int(splat_count),
+        int(label_count),
+    )
+    body = struct.pack("<I", 0) * int(max(segment_frame_count - 1, 0))
+    return header + body
 
 
 def _apply_global_filter(
@@ -425,6 +591,13 @@ def export_sog4d_from_ckpt(
     scale_codebook_size: int,
     scale_codebook_sample: int,
     sh0_codebook_sample: int,
+    sh_bands: int,
+    shn_count: int,
+    shn_centroids_type: Literal["f16", "f32"],
+    shn_labels_encoding: Literal["full", "delta-v1"],
+    shn_codebook_sample: int,
+    shn_assign_chunk: int,
+    shn_kmeans_iters: int,
     seed: int,
     assign_chunk: int,
     overwrite: bool,
@@ -443,6 +616,8 @@ def export_sog4d_from_ckpt(
         raise ValueError("--webp-method must be in [0,6]")
     if not (0 <= webp_quality <= 100):
         raise ValueError("--webp-quality must be in [0,100]")
+    if not (0 <= sh_bands <= 3):
+        raise ValueError("--sh-bands must be in [0,3]")
 
     if output_path.exists():
         if overwrite:
@@ -461,6 +636,8 @@ def export_sog4d_from_ckpt(
     splats = ckpt["splats"]
 
     required = ["means", "scales", "quats", "opacities", "sh0", "times", "durations", "velocities"]
+    if sh_bands > 0:
+        required.append("shN")
     missing = [k for k in required if k not in splats]
     if missing:
         raise KeyError(f"checkpoint missing splats keys: {missing}")
@@ -537,6 +714,56 @@ def export_sog4d_from_ckpt(
     sh0_b = _nearest_codebook_index(sh0_codebook, sh0[:, 2])
     sh0_rgb = np.stack([sh0_r, sh0_g, sh0_b], axis=1).astype(np.uint8)  # [N,3]
 
+    # SH rest(v1) 的 palette + labels(静态).
+    # 说明:
+    # - FreeTimeGS 的 shN 通常不随时间变化,因此 labels 跨帧一致.
+    # - 我们优先实现 v1(single shN palette)并默认配合 delta-v1,减少 bundle 体积.
+    shn_res: Optional[ShNCodebookResult] = None
+    shn_centroids_bytes: Optional[bytes] = None
+    shn_labels_webp_bytes: Optional[bytes] = None
+    shn_delta_bytes: Optional[bytes] = None
+    if sh_bands > 0:
+        shn = _as_numpy_f32(splats["shN"])  # [N,K,3]
+        # 注意: 全局裁剪必须对所有属性一致,因此 shN 也必须跟随 keep 掩码裁剪.
+        shn = shn[keep]
+
+        sh_rest_flat, _rest_coeff_count = _flatten_sh_rest_v1(shn, bands=int(sh_bands))
+        shn_res = _build_shn_v1_codebook_and_labels(
+            sh_rest_flat,
+            shn_count=int(shn_count),
+            sample_size=int(shn_codebook_sample),
+            seed=int(seed),
+            assign_chunk=int(shn_assign_chunk),
+            kmeans_iters=int(shn_kmeans_iters),
+        )
+
+        # centroids: raw binary (little-endian,无 header)
+        if shn_centroids_type == "f16":
+            shn_centroids_bytes = shn_res.centroids_f32.astype("<f2", copy=False).tobytes(order="C")
+        elif shn_centroids_type == "f32":
+            shn_centroids_bytes = shn_res.centroids_f32.astype("<f4", copy=False).tobytes(order="C")
+        else:  # pragma: no cover
+            raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
+
+        # labels: 只要编码一次,后续按 full/delta-v1 复用.
+        shn_labels_img = _make_rgba_image_from_u16_labels(
+            shn_res.labels_u16,
+            pixel_count=pixel_count,
+            width=width,
+            height=height,
+        )
+        shn_labels_webp_bytes = _encode_webp_bytes_rgba(
+            shn_labels_img, webp_method=int(webp_method), webp_quality=int(webp_quality)
+        )
+
+        if shn_labels_encoding == "delta-v1":
+            shn_delta_bytes = _build_label_delta_v1_static(
+                segment_start_frame=0,
+                segment_frame_count=int(frame_count),
+                splat_count=int(n_total),
+                label_count=int(shn_count),
+            )
+
     # -----------------------------
     # 4) 预编码静态 WebP(避免每帧重复编码)
     # -----------------------------
@@ -610,6 +837,30 @@ def export_sog4d_from_ckpt(
 
     eps = np.float32(1e-8)
     with zipfile.ZipFile(tmp_path, mode="w", compression=zip_comp, **zip_kwargs) as zf:
+        # -----------------------------
+        # SH rest(v1) 静态文件: centroids + labels(+delta)
+        # -----------------------------
+        if shn_res is not None:
+            # centroids 文件放在 zip 根目录,路径在 meta.json 里引用.
+            if shn_centroids_bytes is None or shn_labels_webp_bytes is None:
+                raise RuntimeError("internal error: shN centroids/labels bytes missing")
+
+            zf.writestr("shN_centroids.bin", shn_centroids_bytes)
+
+            if shn_labels_encoding == "full":
+                # full: 每帧都要有一张 labels WebP.
+                for frame_idx in range(int(frame_count)):
+                    frame_str = _format_frame(frame_idx)
+                    zf.writestr(f"frames/{frame_str}/shN_labels.webp", shn_labels_webp_bytes)
+            elif shn_labels_encoding == "delta-v1":
+                # delta-v1: 只写 base labels(首帧) + 一个 delta 文件.
+                zf.writestr("frames/00000/shN_labels.webp", shn_labels_webp_bytes)
+                if shn_delta_bytes is None:
+                    raise RuntimeError("internal error: shN delta bytes missing")
+                zf.writestr("sh/shN_delta_00000.bin", shn_delta_bytes)
+            else:  # pragma: no cover
+                raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
+
         # per-frame files
         for frame_idx, t in enumerate(frame_times):
             frame_str = _format_frame(frame_idx)
@@ -689,6 +940,34 @@ def export_sog4d_from_ckpt(
             )
 
         # meta.json 最后写入,避免提前占位导致“需要二次重写 zip”.
+        sh_stream: Dict[str, object] = {
+            "bands": int(sh_bands),
+            "sh0Path": "frames/{frame}/sh0.webp",
+            "sh0Codebook": sh0_codebook.astype(np.float32).tolist(),
+        }
+        if shn_res is not None:
+            sh_stream.update(
+                {
+                    "shNCount": int(shn_count),
+                    "shNCentroidsType": str(shn_centroids_type),
+                    "shNCentroidsPath": "shN_centroids.bin",
+                    "shNLabelsEncoding": str(shn_labels_encoding),
+                }
+            )
+            if shn_labels_encoding == "full":
+                sh_stream["shNLabelsPath"] = "frames/{frame}/shN_labels.webp"
+            elif shn_labels_encoding == "delta-v1":
+                sh_stream["shNDeltaSegments"] = [
+                    {
+                        "startFrame": 0,
+                        "frameCount": int(frame_count),
+                        "baseLabelsPath": "frames/00000/shN_labels.webp",
+                        "deltaPath": "sh/shN_delta_00000.bin",
+                    }
+                ]
+            else:  # pragma: no cover
+                raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
+
         meta: Dict[str, object] = {
             "version": 1,
             "splatCount": int(n_total),
@@ -711,11 +990,7 @@ def export_sog4d_from_ckpt(
                     "indicesPath": "frames/{frame}/scale_indices.webp",
                 },
                 "rotation": {"path": "frames/{frame}/rotation.webp"},
-                "sh": {
-                    "bands": 0,
-                    "sh0Path": "frames/{frame}/sh0.webp",
-                    "sh0Codebook": sh0_codebook.astype(np.float32).tolist(),
-                },
+                "sh": sh_stream,
             },
             "generator": {
                 "tool": "FreeTimeGsVanilla/tools/exportor/export_sog4d.py",
@@ -726,6 +1001,13 @@ def export_sog4d_from_ckpt(
                 "minSigma": float(min_sigma),
                 "alphaZeroThreshold": float(alpha_zero_threshold),
                 "zipCompression": str(zip_compression),
+                "shBands": int(sh_bands),
+                "shNCount": int(shn_count),
+                "shNCentroidsType": str(shn_centroids_type),
+                "shNLabelsEncoding": str(shn_labels_encoding),
+                "shNCodebookSample": int(shn_codebook_sample),
+                "shNAssignChunk": int(shn_assign_chunk),
+                "shNKmeansIters": int(shn_kmeans_iters),
             },
         }
         zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"))
@@ -825,6 +1107,51 @@ def main() -> None:
         default=200_000,
         help="KDTree 分配 indices 的 chunk 大小(防止内存峰值过高)",
     )
+    parser.add_argument(
+        "--sh-bands",
+        type=int,
+        default=0,
+        choices=[0, 1, 2, 3],
+        help="导出 SH 的 band 数(0=仅 sh0+opacity; 1..3=额外导出 shN palette+labels)",
+    )
+    parser.add_argument(
+        "--shn-count",
+        type=int,
+        default=512,
+        help="v1: shN palette 的码字数量(1..65535).越大质量越好,但 kmeans/分配会显著更慢",
+    )
+    parser.add_argument(
+        "--shn-centroids-type",
+        type=str,
+        default="f16",
+        choices=["f16", "f32"],
+        help="v1: shN_centroids.bin 的浮点精度(默认 f16,体积更小)",
+    )
+    parser.add_argument(
+        "--shn-labels-encoding",
+        type=str,
+        default="delta-v1",
+        choices=["full", "delta-v1"],
+        help="v1: labels 编码方式(默认 delta-v1,SH 静态时几乎零成本)",
+    )
+    parser.add_argument(
+        "--shn-codebook-sample",
+        type=int,
+        default=100_000,
+        help="v1: shN kmeans 的采样点数(越大越稳,但越慢).高质量可调到 200k+",
+    )
+    parser.add_argument(
+        "--shn-assign-chunk",
+        type=int,
+        default=50_000,
+        help="v1: shN KDTree 分配 labels 的 chunk 大小(高维时建议更小,避免内存峰值)",
+    )
+    parser.add_argument(
+        "--shn-kmeans-iters",
+        type=int,
+        default=10,
+        help="v1: shN kmeans 迭代次数(越大越稳,但越慢).高质量可调到 20+",
+    )
     parser.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
 
     args = parser.parse_args()
@@ -852,6 +1179,13 @@ def main() -> None:
         scale_codebook_size=int(args.scale_codebook_size),
         scale_codebook_sample=int(args.scale_codebook_sample),
         sh0_codebook_sample=int(args.sh0_codebook_sample),
+        sh_bands=int(args.sh_bands),
+        shn_count=int(args.shn_count),
+        shn_centroids_type=args.shn_centroids_type,
+        shn_labels_encoding=args.shn_labels_encoding,
+        shn_codebook_sample=int(args.shn_codebook_sample),
+        shn_assign_chunk=int(args.shn_assign_chunk),
+        shn_kmeans_iters=int(args.shn_kmeans_iters),
         seed=int(args.seed),
         assign_chunk=int(args.assign_chunk),
         overwrite=bool(args.overwrite),
@@ -860,4 +1194,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
