@@ -346,7 +346,7 @@
 - [x] 阶段2: 实现 SH rest(v1 + delta-v1)
 - [x] 阶段3: 冒烟导出与自检(meta/zip 内容)
 - [x] 阶段4: 全量导出(61 帧)并记录产物路径
-- [ ] 阶段5: 文档与提交(四文件回写 + git commit)
+- [x] 阶段5: 文档与提交(四文件回写 + git commit)
 
 ## 方案方向(至少二选一)
 
@@ -374,7 +374,7 @@
 3. KMeans 计算成本可能成为瓶颈,需要提供采样与 chunk 参数避免内存/时间爆炸.
 
 ## 状态
-**目前在阶段5**: 已完成全量导出,准备做回写与 git 提交.
+**目前在阶段5**: 已完成交付.已回写四文件并完成 git 提交.
 
 ## 状态更新
 - [2026-02-21 09:43:10 UTC] 已完成实现与冒烟导出:
@@ -383,3 +383,5 @@
     - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k_sh3_v1delta.sog4d`
 - [2026-02-21 09:45:50 UTC] 已完成全量导出(61 帧 + 133 万 splats, bands=3, shNCount=512, delta-v1):
   - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d`
+- [2026-02-21 09:49:05 UTC] 已完成回写与 git 提交:
+  - commit: `23da9b7`
