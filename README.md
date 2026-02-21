@@ -6,7 +6,7 @@
 <img src="assets/demo.gif" width="100%" alt="FreeTimeGS Demo">
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
 A vanilla minimal implementation of **FreeTimeGS** built on [gsplat](https://github.com/nerfstudio-project/gsplat) for reconstructing dynamic scenes from multi-view video.
 
@@ -36,6 +36,7 @@ FreeTimeGsVanilla/
 ├── src/                          # Core source code
 │   ├── simple_trainer_freetime_4d_pure_relocation.py   # Main 4D GS trainer
 │   ├── combine_frames_fast_keyframes.py                # Keyframe point cloud combiner
+│   ├── preprocess_mp4_freetimegs.py                    # mp4 -> images + ref COLMAP + RoMA triangulation
 │   ├── viewer_4d.py                                    # Interactive 4D Gaussian viewer
 │   └── utils.py                                        # Utility functions (KNN, colormap, etc.)
 │
@@ -47,8 +48,11 @@ FreeTimeGsVanilla/
 │   └── read_write_model.py       # COLMAP binary/text I/O
 │
 ├── run_pipeline.sh               # Full pipeline (combine + train)
+├── run_mp4_pipeline.sh           # Full pipeline (mp4 -> preprocess -> combine -> train)
 ├── run_small.sh                  # Quick training (4M points)
 ├── run_full.sh                   # Full training (15M points)
+│
+├── tools/                        # Small local CLIs (mermaid-validator, beautiful-mermaid-rs, etc.)
 │
 ├── LICENSE                       # AGPL-3.0 license
 └── README.md                     # This file
@@ -165,8 +169,9 @@ The trainer expects a COLMAP sparse reconstruction:
 
 ```
 data_dir/
-├── images/                    # Or images_Nx/ for downsampled
-│   ├── cam01_frame000000.jpg
+├── images/                    # 每路相机一个子目录
+│   ├── cam01/000000.jpg
+│   ├── cam02/000000.jpg
 │   └── ...
 └── sparse/
     └── 0/
@@ -191,6 +196,21 @@ bash run_pipeline.sh \
     default_keyframe_small            # Config name
 ```
 
+### MP4 Full Pipeline (mp4 -> 4DGS)
+
+如果你的原始输入是"每路相机一个 mp4",可以直接用一键脚本跑通抽帧,参考帧 COLMAP,RoMA 逐帧三角化,全帧 combine,以及训练:
+
+注意: 这个 pipeline 当前假设"相机位姿静态".
+它只在参考帧跑一次 COLMAP 求相机参数与位姿,其它帧复用 `data_dir/sparse/0`.
+
+```bash
+bash run_mp4_pipeline.sh \
+    /path/to/mp4_dir \
+    /path/to/work_dir \
+    /path/to/results \
+    0 61 0 paper_stratified_small
+```
+
 ### Step by Step
 
 **Step 1: Combine keyframes**
@@ -200,7 +220,7 @@ python src/combine_frames_fast_keyframes.py \
     --input-dir /path/to/triangulation/output \
     --output-path /path/to/keyframes.npz \
     --frame-start 0 \
-    --frame-end 60 \
+    --frame-end 61 \
     --keyframe-step 5
 ```
 
@@ -222,6 +242,7 @@ CUDA_VISIBLE_DEVICES=0 python src/simple_trainer_freetime_4d_pure_relocation.py 
 |--------|--------|-------------|
 | `default_keyframe` | ~15M | Full resolution, higher quality |
 | `default_keyframe_small` | ~4M | Reduced points, faster training |
+| `paper_stratified_small` | ~4M | 全帧初始化 + per-frame stratified sampling(更贴近论文) |
 
 ## Outputs
 

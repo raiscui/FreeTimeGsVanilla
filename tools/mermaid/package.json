@@ -1,0 +1,9 @@
+{
+  "name": "freetimegs-mermaid-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "beautiful-mermaid": "^0.1.3"
+  }
+}
+

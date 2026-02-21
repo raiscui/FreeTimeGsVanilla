@@ -73,7 +73,7 @@ python src/combine_frames_fast_keyframes.py \
     --input-dir "$INPUT_DIR" \
     --output-path "$NPZ_PATH" \
     --frame-start "$START_FRAME" \
-    --frame-end "$((END_FRAME - 1))" \
+    --frame-end "$END_FRAME" \
     --keyframe-step "$KEYFRAME_STEP"
 
 echo ""

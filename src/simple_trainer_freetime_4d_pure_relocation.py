@@ -658,11 +658,12 @@ def load_init_npz(
     But the trainer uses normalized time t ∈ [0, 1], so the motion equation:
         μx(t) = μx + v · (t - μt)
 
-    If v is in m/frame and (t - μt) ≈ 1/total_frames for adjacent frames,
-    the displacement is 1/total_frames of expected!
+    If v is in m/frame and normalized time uses:
+        dt = 1 / max(total_frames - 1, 1)
+    then we must scale velocity accordingly,否则位移会偏小.
 
-    FIX: Scale velocity by total_frames so it's in meters/normalized_time:
-        v_scaled = v_m_per_frame × total_frames
+    FIX: Scale velocity by max(total_frames - 1, 1) so it's in meters/normalized_time:
+        v_scaled = v_m_per_frame × max(total_frames - 1, 1)
     """
     print(f"\n[InitNPZ] Loading: {npz_path}")
 
@@ -677,9 +678,11 @@ def load_init_npz(
     npz_frame_start = int(data['frame_start']) if 'frame_start' in data else 0
     npz_frame_end = int(data['frame_end']) if 'frame_end' in data else 300
     npz_total_frames = npz_frame_end - npz_frame_start
+    npz_time_denom = max(npz_total_frames - 1, 1)
 
     n_total = len(positions)
     total_frames = frame_end - frame_start
+    time_denom = max(total_frames - 1, 1)
 
     print(f"  Total points: {n_total:,}")
     print(f"  NPZ frame range: {npz_frame_start}-{npz_frame_end} ({npz_total_frames} frames)")
@@ -694,8 +697,10 @@ def load_init_npz(
         # Filter to points within requested frame range
         # NPZ times are normalized to [0, 1] for npz_frame_range
         # User's frame range as normalized time in NPZ space:
-        t_min = (frame_start - npz_frame_start) / npz_total_frames
-        t_max = (frame_end - npz_frame_start) / npz_total_frames
+        # NPZ 的 time 归一化基于 max(npz_total_frames - 1, 1)
+        frame_end_inclusive = frame_end - 1
+        t_min = (frame_start - npz_frame_start) / npz_time_denom
+        t_max = (frame_end_inclusive - npz_frame_start) / npz_time_denom
 
         # Keep points where time falls within user's range (with small margin)
         margin = 0.01
@@ -719,7 +724,7 @@ def load_init_npz(
 
         # Rescale durations: same window in frames, but different normalized time
         # If duration was 10/300=0.033, for 100 frames it's 10/100=0.1
-        duration_scale = npz_total_frames / total_frames
+        duration_scale = npz_time_denom / time_denom
         durations = durations * duration_scale
 
         print(f"    Rescaled time range: [{times.min():.3f}, {times.max():.3f}]")
@@ -735,14 +740,14 @@ def load_init_npz(
     print(f"    Range: [{vel_mags_raw.min():.6f}, {vel_mags_raw.max():.6f}]")
     print(f"    Mean: {vel_mags_raw.mean():.6f}, Median: {np.median(vel_mags_raw):.6f}")
 
-    # Scale by total_frames to convert to meters/normalized_time
-    # v_scaled = v_m_per_frame × total_frames
-    # Now: displacement = v_scaled × (t2 - t1) where (t2-t1) = 1/total_frames for adjacent frames
-    #      displacement = v_m_per_frame × total_frames × (1/total_frames) = v_m_per_frame ✓
-    velocities = velocities * total_frames
+    # Scale by time_denom to convert to meters/normalized_time
+    # v_scaled = v_m_per_frame × time_denom
+    # Now: displacement = v_scaled × (t2 - t1) where (t2-t1) = 1/time_denom for adjacent frames
+    #      displacement = v_m_per_frame × time_denom × (1/time_denom) = v_m_per_frame ✓
+    velocities = velocities * time_denom
 
     vel_mags_scaled = np.linalg.norm(velocities, axis=1)
-    print(f"  [Velocity Scaling] SCALED velocity (meters/normalized_time, ×{total_frames}):")
+    print(f"  [Velocity Scaling] SCALED velocity (meters/normalized_time, ×{time_denom}):")
     print(f"    Range: [{vel_mags_scaled.min():.6f}, {vel_mags_scaled.max():.6f}]")
     print(f"    Mean: {vel_mags_scaled.mean():.6f}, Median: {np.median(vel_mags_scaled):.6f}")
 
@@ -894,9 +899,11 @@ def load_init_npz_stratified(
     npz_frame_start = int(data['frame_start']) if 'frame_start' in data else 0
     npz_frame_end = int(data['frame_end']) if 'frame_end' in data else 300
     npz_total_frames = npz_frame_end - npz_frame_start
+    npz_time_denom = max(npz_total_frames - 1, 1)
 
     n_total = len(positions)
     total_frames = frame_end - frame_start
+    time_denom = max(total_frames - 1, 1)
 
     print(f"\n  Total points in NPZ: {n_total:,}")
     print(f"  NPZ frame range: {npz_frame_start}-{npz_frame_end} ({npz_total_frames} frames)")
@@ -906,8 +913,9 @@ def load_init_npz_stratified(
     # FRAME RANGE FILTERING (if training on subset of NPZ frames)
     # =========================================================================
     if total_frames < npz_total_frames:
-        t_min = (frame_start - npz_frame_start) / npz_total_frames
-        t_max = (frame_end - npz_frame_start) / npz_total_frames
+        frame_end_inclusive = frame_end - 1
+        t_min = (frame_start - npz_frame_start) / npz_time_denom
+        t_max = (frame_end_inclusive - npz_frame_start) / npz_time_denom
 
         margin = 0.01
         time_mask = (times >= t_min - margin) & (times <= t_max + margin)
@@ -928,7 +936,7 @@ def load_init_npz_stratified(
         times = np.clip(times, 0.0, 1.0)
 
         # Rescale durations
-        duration_scale = npz_total_frames / total_frames
+        duration_scale = npz_time_denom / time_denom
         durations = durations * duration_scale
 
         print(f"    Rescaled time range: [{times.min():.3f}, {times.max():.3f}]")
@@ -938,7 +946,7 @@ def load_init_npz_stratified(
     # =========================================================================
     # VELOCITY SCALING: meters/frame → meters/normalized_time
     # =========================================================================
-    velocities = velocities * total_frames
+    velocities = velocities * time_denom
     vel_mags = np.linalg.norm(velocities, axis=1)
     print(f"\n  Velocity (scaled): [{vel_mags.min():.4f}, {vel_mags.max():.4f}]")
 
@@ -1213,6 +1221,7 @@ def load_init_npz_keyframe(
     npz_frame_start = int(data['frame_start']) if 'frame_start' in data else 0
     npz_frame_end = int(data['frame_end']) if 'frame_end' in data else 300
     npz_total_frames = npz_frame_end - npz_frame_start
+    npz_time_denom = max(npz_total_frames - 1, 1)
 
     # Read keyframe_step from NPZ metadata if not explicitly provided
     npz_keyframe_step = int(data['keyframe_step']) if 'keyframe_step' in data else 5
@@ -1226,6 +1235,7 @@ def load_init_npz_keyframe(
 
     n_total = len(positions)
     total_frames = frame_end - frame_start
+    time_denom = max(total_frames - 1, 1)
 
     print(f"\n  Total points in NPZ: {n_total:,}")
     print(f"  NPZ frame range: {npz_frame_start}-{npz_frame_end} ({npz_total_frames} frames)")
@@ -1248,13 +1258,13 @@ def load_init_npz_keyframe(
     print(f"    Keyframe times: {keyframe_times[:10].round(3)}{'...' if len(keyframe_times) > 10 else ''}")
 
     # Gap between keyframes in normalized time
-    keyframe_gap = keyframe_step / total_frames
+    keyframe_gap = keyframe_step / time_denom
 
     # Auto-compute init_duration if set to -1
     if init_duration < 0:
         init_duration = keyframe_gap * init_duration_multiplier
         print(f"\n  [AUTO DURATION] Computing from NPZ metadata:")
-        print(f"    keyframe_gap = {keyframe_step} / {total_frames} = {keyframe_gap:.4f}")
+        print(f"    keyframe_gap = {keyframe_step} / {time_denom} = {keyframe_gap:.4f}")
         print(f"    init_duration = {keyframe_gap:.4f} * {init_duration_multiplier} = {init_duration:.4f}")
     else:
         print(f"\n  [EXPLICIT DURATION] Using init_duration from config: {init_duration:.4f}")
@@ -1275,8 +1285,9 @@ def load_init_npz_keyframe(
     # FRAME RANGE FILTERING (if training on subset of NPZ frames)
     # =========================================================================
     if total_frames < npz_total_frames:
-        t_min = (frame_start - npz_frame_start) / npz_total_frames
-        t_max = (frame_end - npz_frame_start) / npz_total_frames
+        frame_end_inclusive = frame_end - 1
+        t_min = (frame_start - npz_frame_start) / npz_time_denom
+        t_max = (frame_end_inclusive - npz_frame_start) / npz_time_denom
 
         margin = 0.01
         time_mask = (times >= t_min - margin) & (times <= t_max + margin)
@@ -1301,7 +1312,7 @@ def load_init_npz_keyframe(
     # =========================================================================
     # VELOCITY SCALING: meters/frame → meters/normalized_time
     # =========================================================================
-    velocities = velocities * total_frames
+    velocities = velocities * time_denom
     vel_mags = np.linalg.norm(velocities, axis=1)
     print(f"\n  Velocity (scaled): [{vel_mags.min():.4f}, {vel_mags.max():.4f}]")
 
@@ -3295,6 +3306,54 @@ if __name__ == "__main__":
 
                 # ============ Random Background ============
                 random_bkgd=False,            # Disabled for 4D
+            ),
+        ),
+        "paper_stratified_small": (
+            "Paper-Pure stratified sampling over ALL frames (requires init NPZ from --mode all_frames).",
+            Config(
+                # ============ Paper-Pure Sampling ============
+                max_samples=4_000_000,        # 先用 4M 跑通,显存更安全
+                use_stratified_sampling=True, # KEY: 每帧均匀覆盖,避免 high-velocity 噪点偏置
+                use_keyframe_sampling=False,
+                sample_high_velocity_ratio=0.0,
+
+                # ============ Initialization ============
+                init_opacity=0.5,
+                init_scale=0.03,              # 与 default_keyframe_small 对齐,更省显存
+
+                # durations: 全帧初始化时,NPZ 的 duration 往往偏小,这里强制一个更稳的下限
+                auto_init_duration=False,
+                init_duration=0.2,
+
+                # ============ Velocity ============
+                use_velocity=True,
+                velocity_lr_start=5e-3,
+                velocity_lr_end=1e-4,
+
+                # ============ DISABLE Standard Densification ============
+                strategy=DefaultStrategy(
+                    verbose=True,
+                    refine_start_iter=100_000,
+                    refine_stop_iter=100_000,
+                    reset_every=100_000,
+                ),
+
+                # ============ ENABLE Pure Relocation ============
+                use_relocation=True,
+                relocation_every=100,
+                densification_start_step=100,
+                relocation_stop_iter=60_000,
+                relocation_max_ratio=0.10,
+
+                # ============ Memory Safety ============
+                packed=True,
+
+                # ============ Regularization ============
+                lambda_4d_reg=1e-4,
+                lambda_duration_reg=1e-3,
+
+                # ============ Random Background ============
+                random_bkgd=False,
             ),
         ),
     }

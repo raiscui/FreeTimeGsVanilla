@@ -13,6 +13,7 @@ requires-python = ">=3.12"
 dependencies = [
     "torch",
     "pycolmap",
+    "romatch",
     "viser",
     "nerfview==0.0.2",
     "imageio[ffmpeg]",
@@ -27,7 +28,6 @@ dependencies = [
     "tensorly",
     "pyyaml",
     "matplotlib",
-    "torch_scatter",
     "fused-ssim",
     "plas",
     "natsort",
@@ -37,10 +37,22 @@ dependencies = [
 ]
 
 [tool.uv]
+required-version = ">=0.10.4"
 override-dependencies = ["pandas>=2.2"]
+no-build-isolation-package = ["fused-ssim", "gsplat"]
 
 [tool.uv.sources]
 pycolmap = { git = "https://github.com/JasonLSC/pycolmap.git" }
 fused-ssim = { git = "https://github.com/rahul-goel/fused-ssim", rev = "1272e21a282342e89537159e4bad508b19b34157" }
 plas = { git = "https://github.com/fraunhoferhhi/PLAS.git" }
 gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git" }
+
+[[tool.uv.dependency-metadata]]
+name = "fused-ssim"
+version = "0.0.0"
+requires-dist = []
+
+[[tool.uv.dependency-metadata]]
+name = "gsplat"
+version = "1.5.3"
+requires-dist = ["jaxtyping", "ninja", "numpy", "rich", "torch"]

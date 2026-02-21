@@ -26,17 +26,24 @@ Usage:
     python src/combine_frames_fast_keyframes.py \\
         --input-dir /path/to/triangulation/output \\
         --output-path /path/to/keyframes_with_velocity.npz \\
-        --frame-start 0 --frame-end 299 \\
+        --frame-start 0 --frame-end 300 \\
         --keyframe-step 5
 
     # With smart sampling (recommended for large datasets)
     python src/combine_frames_fast_keyframes.py \\
         --input-dir /path/to/triangulation/output \\
         --output-path /path/to/keyframes_smart_6M.npz \\
-        --frame-start 0 --frame-end 299 \\
+        --frame-start 0 --frame-end 300 \\
         --keyframe-step 5 \\
         --use-smart-sampling \\
         --total-budget 6000000
+
+    # All frames mode (Paper-Pure / stratified init)
+    python src/combine_frames_fast_keyframes.py \\
+        --mode all_frames \\
+        --input-dir /path/to/triangulation/output \\
+        --output-path /path/to/all_frames_with_velocity.npz \\
+        --frame-start 0 --frame-end 61
 
 Output NPZ contains:
 - positions: [N, 3] - 3D positions from keyframes only
@@ -351,6 +358,10 @@ def main():
         description="Combine keyframes with velocity for efficient 4D training"
     )
     parser.add_argument(
+        "--mode", type=str, default="keyframes", choices=["keyframes", "all_frames"],
+        help="合并模式: keyframes(仅合并关键帧,速度用 t->t+1) 或 all_frames(合并全帧)"
+    )
+    parser.add_argument(
         "--input-dir", type=str, required=True,
         help="Directory containing points3d_frameXXXXXX.npy files"
     )
@@ -363,8 +374,8 @@ def main():
         help="First frame index"
     )
     parser.add_argument(
-        "--frame-end", type=int, default=299,
-        help="Last frame index"
+        "--frame-end", type=int, default=300,
+        help="End frame index (exclusive)"
     )
     parser.add_argument(
         "--keyframe-step", type=int, default=5,
@@ -418,31 +429,56 @@ def main():
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Calculate keyframe indices
-    keyframes = list(range(args.frame_start, args.frame_end + 1, args.keyframe_step))
-    n_keyframes = len(keyframes)
-    total_frames = args.frame_end - args.frame_start + 1
+    # ---------------------------------------------------------------------
+    # IMPORTANT: 帧范围语义统一为 [frame_start, frame_end) (end exclusive)
+    # ---------------------------------------------------------------------
+    if args.frame_end <= args.frame_start:
+        raise ValueError(
+            f"Invalid frame range: frame_start={args.frame_start}, frame_end={args.frame_end} (end exclusive)"
+        )
 
-    # Normalized time step between frames
-    dt_normalized = 1.0 / total_frames  # For velocity scaling later
+    total_frames = args.frame_end - args.frame_start
+    time_denom = max(total_frames - 1, 1)
 
-    # Duration that bridges the keyframe gap (3x the gap for smooth overlap)
-    gap_normalized = args.keyframe_step / total_frames
-    default_duration = gap_normalized * 3  # 3x overlap
+    # 选择要处理的帧索引
+    if args.mode == "keyframes":
+        selected_frames = list(range(args.frame_start, args.frame_end, args.keyframe_step))
+        used_step = args.keyframe_step
+        mode_title = "KEYFRAMES"
+    else:
+        selected_frames = list(range(args.frame_start, args.frame_end))
+        used_step = 1
+        mode_title = "ALL_FRAMES"
+
+    n_selected = len(selected_frames)
+
+    # Duration: 用 gap 的 3x 做重叠(与原脚本保持一致的经验值)
+    gap_normalized = used_step / time_denom
+    default_duration = gap_normalized * 3.0
 
     print("=" * 70)
-    print("COMBINE KEYFRAMES WITH VELOCITY")
+    print(f"COMBINE FRAMES WITH VELOCITY ({mode_title})")
     print("=" * 70)
     print(f"Input directory: {input_dir}")
     print(f"Output path: {output_path}")
-    print(f"\nFrame range: {args.frame_start} to {args.frame_end} ({total_frames} frames)")
-    print(f"Keyframe step: {args.keyframe_step}")
-    print(f"Number of keyframes: {n_keyframes}")
-    print(f"Keyframes: {keyframes[:10]}..." if len(keyframes) > 10 else f"Keyframes: {keyframes}")
+    print(f"\nFrame range: [{args.frame_start}, {args.frame_end}) ({total_frames} frames)")
+    print(f"Mode: {args.mode}")
+    if args.mode == "keyframes":
+        print(f"Keyframe step: {args.keyframe_step}")
+        print(f"Number of keyframes: {n_selected}")
+        print(
+            f"Keyframes: {selected_frames[:10]}..."
+            if len(selected_frames) > 10
+            else f"Keyframes: {selected_frames}"
+        )
+    else:
+        print(f"Number of frames: {n_selected}")
     print(f"\nVelocity Settings:")
     print(f"  Max distance: {args.max_velocity_distance}")
     print(f"  K-neighbors: {args.k_neighbors}")
     print(f"\nTemporal Settings:")
+    print(f"  Time normalize denom: max(total_frames - 1, 1) = {time_denom}")
+    print(f"  Gap frames: {used_step}")
     print(f"  Keyframe gap (normalized): {gap_normalized:.4f}")
     print(f"  Auto duration (3x gap): {default_duration:.4f}")
     print(f"\nSampling:")
@@ -464,15 +500,15 @@ def main():
     total_points = 0
     total_valid_velocity = 0
 
-    # Process each keyframe
-    for i, keyframe in enumerate(tqdm(keyframes, desc="Processing keyframes")):
-        next_frame = keyframe + 1
+    # Process frames (keyframes or all frames)
+    for frame_idx in tqdm(selected_frames, desc=f"Processing {args.mode}"):
+        next_frame = frame_idx + 1
 
-        # Load keyframe data
-        positions, colors = load_frame_data(input_dir, keyframe)
+        # Load frame data
+        positions, colors = load_frame_data(input_dir, frame_idx)
 
         if positions is None:
-            print(f"\n  Warning: Missing keyframe {keyframe}")
+            print(f"\n  Warning: Missing frame {frame_idx}")
             continue
 
         n_points_original = len(positions)
@@ -498,13 +534,14 @@ def main():
             )
             n_valid = valid_mask.sum()
         else:
-            # No next frame available (last keyframe or missing data)
+            # No next frame available (last frame or missing data)
             velocities = np.zeros_like(positions)
             valid_mask = np.zeros(n_points, dtype=bool)
             n_valid = 0
 
-        # Compute normalized time for this keyframe
-        t_normalized = (keyframe - args.frame_start) / total_frames
+        # Compute normalized time for this frame
+        # time = (frame - start) / max(total_frames - 1, 1) -> [0, 1]
+        t_normalized = (frame_idx - args.frame_start) / time_denom
         times = np.full((n_points, 1), t_normalized, dtype=np.float32)
         durations = np.full((n_points, 1), default_duration, dtype=np.float32)
 
@@ -589,9 +626,11 @@ def main():
     print("\n" + "=" * 70)
     print("FINAL STATISTICS")
     print("=" * 70)
-    print(f"Total keyframes processed: {len(all_positions)}/{n_keyframes}")
+    processed_label = "keyframes" if args.mode == "keyframes" else "frames"
+    unit_label = "keyframe" if args.mode == "keyframes" else "frame"
+    print(f"Total {processed_label} processed: {len(all_positions)}/{n_selected}")
     print(f"Total points: {len(positions):,}")
-    print(f"Points per keyframe: ~{len(positions) // len(all_positions):,}")
+    print(f"Points per {unit_label}: ~{len(positions) // max(len(all_positions), 1):,}")
     print(f"\nVelocity Statistics:")
     print(f"  Points with valid velocity: {has_velocity.sum():,} ({100*has_velocity.sum()/len(positions):.1f}%)")
     if len(valid_vel_mag) > 0:
@@ -616,12 +655,12 @@ def main():
         # Metadata
         frame_start=args.frame_start,
         frame_end=args.frame_end,
-        keyframe_step=args.keyframe_step,
-        n_keyframes=n_keyframes,
+        keyframe_step=used_step,
+        n_keyframes=n_selected,
         max_velocity_distance=args.max_velocity_distance,
         k_neighbors=args.k_neighbors,
         sample_ratio=args.sample_ratio,
-        mode="keyframes_with_velocity",
+        mode=f"{args.mode}_with_velocity",
     )
 
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -631,10 +670,11 @@ def main():
     print("=" * 70)
     print(f"Saved to: {output_path}")
     print(f"File size: {file_size_mb:.1f} MB")
-    print(f"\nNext step: Train with default_keyframe config:")
-    print(f"  python src/simple_trainer_freetime_4d_pure_relocation.py default_keyframe \\")
+    next_cfg = "default_keyframe_small" if args.mode == "keyframes" else "paper_stratified_small"
+    print(f"\nNext step: Train (example):")
+    print(f"  python src/simple_trainer_freetime_4d_pure_relocation.py {next_cfg} \\")
     print(f"      --init-npz-path {output_path} \\")
-    print(f"      --start-frame 0 --end-frame {total_frames}")
+    print(f"      --start-frame {args.frame_start} --end-frame {args.frame_end}")
     print("=" * 70)
 
 

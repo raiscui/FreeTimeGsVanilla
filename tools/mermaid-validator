@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 说明:
+# - 这是一个薄封装,把命令名固定为 "mermaid-validator".
+# - 实际实现位于 tools/mermaid/mermaid-validator.mjs.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node "${SCRIPT_DIR}/mermaid/mermaid-validator.mjs" "$@"
+
