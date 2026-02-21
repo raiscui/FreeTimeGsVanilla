@@ -231,7 +231,7 @@
 - [x] 阶段1: 计划与约束确认
 - [x] 阶段2: 实现稳态改进(COLMAP 自动降级重试 + 训练默认下采样)
 - [x] 阶段3: 本地验证(compileall/import/mermaid-validator)
-- [ ] 阶段4: 改写 git 历史(重写 author)并提交
+- [x] 阶段4: 改写 git 历史(重写 author)并提交
 
 ## 方案方向(至少二选一)
 
@@ -254,13 +254,13 @@
 
 ## 关键问题
 1. 你的 git 作者信息是:
-   - user.name = ?
-   - user.email = ?
+   - user.name = raiscui
+   - user.email = vdcoolzi@gmail.com
 2. 你希望 author 改写后保留原提交时间,还是接受“重写提交时间为当前时间”?
    - 说明: `git commit --amend --reset-author` 通常会把 author date 更新为当前时间.
 
 ## 状态
-**目前在阶段4**: 稳态改进已实现且本地验证通过.正在等待你的 `user.name/user.email` 以便提交并重写历史 author.
+**目前在阶段4**: 已完成交付.稳态改进已提交,且已把近期提交的 author 统一改为 `raiscui <vdcoolzi@gmail.com>`(并尽量保持原提交时间不变).
 
 ## 状态更新
 - [2026-02-21 07:44:38 UTC] 已完成稳态改进与本地验证:
@@ -268,3 +268,9 @@
   - `src/simple_trainer_freetime_4d_pure_relocation.py`: `paper_stratified_small` 默认 `data_factor=4`,`max_samples=2_000_000`.
   - `run_mp4_pipeline.sh`: 增加可选环境变量覆盖(DATA_FACTOR/MAX_SAMPLES/COLMAP_*).
   - 验证: `python -m compileall src datasets` + `import torch, gsplat, romatch` + `./tools/mermaid-validator ...` 均通过.
+- [2026-02-21 07:57:40 UTC] 已完成提交与 author 改写:
+  - 本地 git 身份已更新: `raiscui <vdcoolzi@gmail.com>`.
+  - 已提交稳态增强: `2ec4ed5`.
+  - 已重写近期提交的 author:
+    - `4ca57de`(原 `d537095`)
+    - `45a229f`(原 `55fffaf`)
