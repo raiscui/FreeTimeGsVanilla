@@ -613,9 +613,9 @@
 同时保留原上游远端,用于后续同步.
 
 ## 阶段
-- [ ] 阶段1: 计划和设置
-- [ ] 阶段2: 确认变更范围
-- [ ] 阶段3: 提交本地变更
+- [x] 阶段1: 计划和设置
+- [x] 阶段2: 确认变更范围
+- [x] 阶段3: 提交本地变更
 - [ ] 阶段4: 配置远端并 push
 - [ ] 阶段5: 验证远端状态
 
@@ -644,5 +644,20 @@
   - `.codex/` 与 `openspec/config.yaml` 作为项目工作流辅助文件一并纳入.
   - `.vscode/settings.json` 暂不提交(纯外观配置,容易污染团队仓库).
 
+## 遇到错误
+- [2026-02-21 16:08:51 UTC] `git push -u origin main` 失败:
+  - 报错: `fatal: could not read Username for 'https://github.com': terminal prompts disabled`
+  - 结论: 当前环境未配置 GitHub https 凭据,且为避免卡死我禁用了交互式 prompt.需要提供 PAT/凭据后才能继续 push.
+
 ## 状态
-**目前在阶段1**: 已读取 git 状态,已追加本任务记录,准备开始配置远端与提交/push.
+**目前在阶段4**: 已完成远端配置与本地提交,但 push 阻塞在 GitHub https 认证,等待补齐凭据后重试.
+
+## 状态更新
+- [2026-02-21 16:07:26 UTC] 已完成远端配置:
+  - `git remote rename origin upstream`
+  - `git remote add origin https://github.com/raiscui/FreeTimeGsVanilla.git`
+- [2026-02-21 16:08:11 UTC] 已完成本地提交(不包含 `.vscode/`):
+  - `fd5e629` `Chore: add OpenSpec workflow skills`
+  - `1f7f416` `Export: update sog4d/splat4d v2 and docs`
+- [2026-02-21 16:08:11 UTC] 已确认远端可 fast-forward:
+  - `origin/main` 当前为 `911dcf4`,是本地 `HEAD` 的祖先
