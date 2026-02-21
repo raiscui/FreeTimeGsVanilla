@@ -274,3 +274,56 @@
   - 已重写近期提交的 author:
     - `4ca57de`(原 `d537095`)
     - `45a229f`(原 `55fffaf`)
+
+
+# 任务计划: FreeTimeGS checkpoint(.pt) -> `.sog4d` exporter + 导出 bar_release_full ckpt
+
+## 目标
+1. 在本仓库实现一个可复用的导出工具: 把 FreeTimeGS 的 checkpoint(`ckpt_*.pt`)导出为 Unity 可导入的 `.sog4d`(ZIP bundle).
+2. 用该工具把:
+   - `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+   导出为 `.sog4d`,产物落到 `results/` 下(不进入 git).
+
+## 阶段
+- [x] 阶段1: 计划与规格对齐(阅读 `tools/exportor/*.md`,明确 meta.json/streams/layout/timeMapping)
+- [x] 阶段2: 实现 exporter(先做 bands=0 的最小可用,再扩展)
+- [x] 阶段3: 本地验证(小规模导出 5 帧 + 自检 meta/layout)
+- [x] 阶段4: 全量导出(帧段 61 帧)并记录产物路径
+- [x] 阶段5: 回写记录(WORKLOG/notes/ERRORFIX/LATER_PLANS)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(最终形态,更快更干净)
+- 直接写 `.sog4d`:
+  - checkpoint -> 逐帧采样(pos/opacity) -> 量化 -> 写 WebP 数据图 -> 写 meta.json -> 打包 ZIP.
+- 优点: 无中间 PLY,IO 更少,更容易 chunk 控制内存峰值.
+- 缺点: 需要在 exporter 里实现更多格式细节(但 `tools/exportor/spec.md` 已经把规则写清楚).
+
+### 方向B: 先能用,后面再优雅(依赖 pack 工具)
+- checkpoint -> per-frame PLY -> 调用现成 pack(`ply_sequence_to_sog4d.py pack`).
+- 优点: pack/validate 逻辑复用,实现压力小.
+- 缺点: 本仓库当前不存在 pack 工具实现,而且会产生大量 PLY 中间文件,IO 很大.
+
+## 做出的决定
+- [2026-02-21 09:12:00 UTC] 选择方向A: 直接写 `.sog4d`.
+  - 先实现 `bands=0`(只导出 sh0+opacity),确保 Unity 能导入和播放.
+  - 后续如确实需要更高质量的光照,再增量实现 `bands>0` 的 SH rest(palette + labels + delta-v1).
+
+## 关键约束与已选决定
+1. `.sog4d` 必须满足 frame-to-frame splat identity 稳定:
+   - `splatCount` 固定.
+   - layout 固定(row-major,width/height 固定).
+2. per-frame 文件路径模板必须包含 `{frame}`,并按至少 5 位 0-padding.
+3. 先导出帧数: `frameCount=61`,timeMapping 用 uniform(0..1 均匀).
+4. 默认 zip 压缩: stored(因为 WebP 本身已压缩,再 deflate 通常收益不大).
+
+## 状态
+**目前在阶段5**: 已完成交付.导出器已落地并成功导出指定 ckpt 的 `.sog4d`.
+
+## 状态更新
+- [2026-02-21 09:19:20 UTC] 完成 exporter 落地与导出:
+  - 新增脚本: `tools/exportor/export_sog4d.py`(当前实现 `bands=0`).
+  - 冒烟导出(5 帧 + 5 万 splats):
+    - `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k.sog4d`
+  - 全量导出(61 帧 + 133 万 splats):
+    - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d`(约 1.1G)

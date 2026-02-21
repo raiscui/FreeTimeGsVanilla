@@ -72,3 +72,11 @@
   - `paper_stratified_small` 默认 `data_factor=4`,`max_samples=2_000_000`.
   - `run_mp4_pipeline.sh` 支持用环境变量覆盖 `DATA_FACTOR/MAX_SAMPLES/COLMAP_*`,不用改脚本就能适配更大分辨率数据.
 - 将 git 提交的作者信息统一改为你的 author(`raiscui <vdcoolzi@gmail.com>`),方便后续直接 push 到远端.
+
+## 2026-02-21 09:19:20 UTC
+- 新增 `.sog4d` 导出工具: `tools/exportor/export_sog4d.py`.
+  - 按 `tools/exportor/spec.md` 的 streams/layout/timeMapping 规则写 `meta.json` 与 per-frame WebP 数据图.
+  - 当前最小可用实现为 `bands=0`(只导出 sh0+opacity),先保证 Unity 能导入能播放.
+- 已完成对你指定 checkpoint 的导出:
+  - 输入: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+  - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d`(约 1.1G)

@@ -168,3 +168,48 @@
   - 新增 `--mode {keyframes,all_frames}`.
   - 统一 `--frame-end` 语义为 end exclusive.
   - all_frames 模式会把每帧点云都写入 NPZ,用于 `use_stratified_sampling=True`.
+
+
+## 2026-02-21 09:19:20 UTC 追加: checkpoint(.pt) -> `.sog4d` 导出器落地记录
+
+### 背景与目标
+- 目标: 把 FreeTimeGS checkpoint(`ckpt_*.pt`)导出为 Unity 可导入播放的 `.sog4d`(ZIP bundle).
+- 参考规格与施工图:
+  - `tools/exportor/spec.md`
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md`
+  - `tools/exportor/export_splat4d.py`
+
+### 实现结论(当前最小可用)
+- 已新增脚本: `tools/exportor/export_sog4d.py`
+- 当前 exporter 默认实现 `bands=0`:
+  - streams: `position`/`scale`/`rotation`/`sh`(sh0+opacity)
+  - 不导出 SH rest(`shN`),先保证“能导入能播放”.
+- 关键点:
+  - position: per-frame range + u16 hi/lo 两张 lossless WebP.
+  - scale: kmeans2(log-domain) 拟合 codebook + u16 indices WebP(静态内容复用).
+  - rotation: quat(wxyz) -> u8 WebP(静态内容复用).
+  - sh0.webp: RGB 为 `f_dc` 的 codebook 索引,A 为每帧 `opacity(t)`.
+
+### 实际导出(你指定的 ckpt)
+- 输入 ckpt:
+  - `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`(num_GS=1,335,131)
+- 输出 `.sog4d`:
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d`
+  - 约 1.1G
+
+### 关键命令(可复现)
+```bash
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output-path results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full.sog4d \
+  --frame-count 61 \
+  --layout-width 2048 \
+  --webp-method 0 \
+  --zip-compression stored \
+  --overwrite
+```
+
+### 快速冒烟(更快,用于验证工具链)
+- `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f5_k50k.sog4d`
+- 参数: `--frame-count 5 --max-splats 50000 --layout-width 1024`
