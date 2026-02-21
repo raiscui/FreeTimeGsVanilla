@@ -402,7 +402,7 @@
 - [x] 阶段1: 计划与约束确认(明确 v1/v2 的字段语义)
 - [x] 阶段2: 实现 v2 导出(新增 CLI 参数,并保持 v1 不变)
 - [x] 阶段3: 冒烟导出与 sanity check(文件大小/写入进度/基本统计)
-- [ ] 阶段4: 文档与提交(四文件回写 + git commit)
+- [x] 阶段4: 文档与提交(四文件回写 + git commit)
 
 ## 方案方向(至少二选一)
 
@@ -420,9 +420,11 @@
 - [2026-02-21 09:57:20 UTC] 选择方向A: 同时支持 v1/v2,并补清晰的 CLI 文档与最小 sanity 输出.
 
 ## 状态
-**目前在阶段4**: 已完成实现与冒烟导出,准备回写与 git 提交.
+**目前在阶段4**: 已完成交付.已回写四文件并完成 git 提交.
 
 ## 状态更新
 - [2026-02-21 09:57:20 UTC] 已完成实现与冒烟导出:
   - `tools/exportor/export_splat4d.py` 新增 `--splat4d-version 1|2`(v2=gaussian time kernel).
   - 产物: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`
+- [2026-02-21 10:00:23 UTC] 已完成回写与 git 提交:
+  - commit: `45f254e`
