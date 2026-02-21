@@ -442,7 +442,7 @@
 - [x] 阶段1: 对齐事实(以 `--help` 为准核对参数名/默认值)
 - [x] 阶段2: 更新 `README.md`(补一个最小 Export/Unity 小节)
 - [x] 阶段3: 更新 `tools/exportor/FreeTimeGsCheckpointToSog4D.md`(参数表 + 示例命令)
-- [ ] 阶段4: 回写与提交(WORKLOG/notes/task_plan + git commit)
+- [x] 阶段4: 回写与提交(WORKLOG/notes/task_plan + git commit)
 
 ## 方案方向(至少二选一)
 
@@ -461,9 +461,11 @@
 - [2026-02-21 10:04:29 UTC] 选择方向A: README + exporter 文档一起更新,以减少参数出入导致的重复沟通.
 
 ## 状态
-**目前在阶段4**: 已完成文档更新与回写(WORKLOG/notes),准备 git commit.
+**目前在阶段4**: 已完成交付.文档已更新并完成 git 提交.
 
 ## 状态更新
 - [2026-02-21 10:06:56 UTC] 已完成文档更新:
   - `README.md` 增加 `Export (Unity)` 小节,对齐 exporter 参数与示例命令.
   - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数建议为以 `--help` 为准,并标注未实现项.
+- [2026-02-21 10:07:59 UTC] 已完成 git 提交:
+  - commit: `981f0d1`
