@@ -218,6 +218,13 @@ bash run_mp4_pipeline.sh \
   - `MAX_SAMPLES=200000`(初始化点太密时更稳)
   - `COLMAP_SIFT_NUM_THREADS=1`,`COLMAP_SIFT_MAX_IMAGE_SIZE=1600`,`COLMAP_SIFT_MAX_NUM_FEATURES=4096`(参考帧 COLMAP OOM 时更稳)
 
+一个可直接复制粘贴的“更稳”示例:
+```bash
+DATA_FACTOR=8 MAX_SAMPLES=200000 \
+COLMAP_SIFT_NUM_THREADS=1 COLMAP_SIFT_MAX_IMAGE_SIZE=1600 COLMAP_SIFT_MAX_NUM_FEATURES=4096 \
+bash run_mp4_pipeline.sh /path/to/mp4_dir /path/to/work_dir /path/to/results 0 61 0 paper_stratified_small
+```
+
 ### Step by Step
 
 **Step 1: Combine keyframes**
