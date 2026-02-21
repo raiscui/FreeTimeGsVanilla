@@ -428,3 +428,42 @@
   - 产物: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`
 - [2026-02-21 10:00:23 UTC] 已完成回写与 git 提交:
   - commit: `45f254e`
+
+
+# 任务计划: 更新导出说明文档(参数对齐,补齐导出方法)
+
+## 目标
+把仓库内关于导出工具的说明文档更新到“以代码为准”的状态:
+- `export_sog4d.py`(支持 `--sh-bands > 0` 的 v1 SH rest + delta-v1)的参数与示例命令与当前实现一致.
+- `export_splat4d.py`(支持 `--splat4d-version 2`)的参数与示例命令与当前实现一致.
+- 文档里若出现未实现的参数(例如 `--sh-version`, `--delta-segment-length`),要明确标注“暂未实现”或移除,避免误导.
+
+## 阶段
+- [x] 阶段1: 对齐事实(以 `--help` 为准核对参数名/默认值)
+- [x] 阶段2: 更新 `README.md`(补一个最小 Export/Unity 小节)
+- [x] 阶段3: 更新 `tools/exportor/FreeTimeGsCheckpointToSog4D.md`(参数表 + 示例命令)
+- [ ] 阶段4: 回写与提交(WORKLOG/notes/task_plan + git commit)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,更少踩坑)
+- 同时更新:
+  - `README.md`(给“怎么用”的入口)
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md`(给“为什么这么做”的施工图)
+- 并给出两类可复制粘贴示例:
+  - `.sog4d`: `bands=0` 与 `bands=3(delta-v1)` 各一条
+  - `.splat4d`: v1 与 v2 各一条
+
+### 方向B: 先能用,后面再优雅
+- 只更新 `tools/exportor/FreeTimeGsCheckpointToSog4D.md`,不动 README.
+
+## 做出的决定
+- [2026-02-21 10:04:29 UTC] 选择方向A: README + exporter 文档一起更新,以减少参数出入导致的重复沟通.
+
+## 状态
+**目前在阶段4**: 已完成文档更新与回写(WORKLOG/notes),准备 git commit.
+
+## 状态更新
+- [2026-02-21 10:06:56 UTC] 已完成文档更新:
+  - `README.md` 增加 `Export (Unity)` 小节,对齐 exporter 参数与示例命令.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数建议为以 `--help` 为准,并标注未实现项.

@@ -280,6 +280,66 @@ Note:
 - 训练 step 在代码里是 0-based.
 - 例如你跑 `--max-steps 30000`,最终 step 会是 29999,因此文件名会是 `ckpt_29999.pt`.
 
+## Export (Unity)
+
+本仓库提供两个导出脚本,用于把训练产物导出到 Unity 可消费的格式.
+建议把输出写到 `results/` 下(默认 gitignored),避免污染仓库.
+
+### Export `.sog4d` (ZIP bundle)
+
+最小可用(bands=0,只导出 sh0+opacity):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path /path/to/ckpt_29999.pt \
+  --output-path /path/to/out.sog4d \
+  --frame-count 61 \
+  --layout-width 2048 \
+  --sh-bands 0 \
+  --zip-compression stored \
+  --overwrite
+```
+
+含 SH rest(bands=3,meta.version=1 + delta-v1):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path /path/to/ckpt_29999.pt \
+  --output-path /path/to/out_sh3.sog4d \
+  --frame-count 61 \
+  --layout-width 2048 \
+  --sh-bands 3 \
+  --shn-count 512 \
+  --shn-centroids-type f16 \
+  --shn-labels-encoding delta-v1 \
+  --zip-compression stored \
+  --overwrite
+```
+
+备注:
+- `--shn-count` 越大,SH 质量通常越好,但导出会明显变慢(因为 CPU kmeans + labels 分配).
+- 快速验证可以加 `--max-splats 50000` 先做冒烟包.
+
+### Export `.splat4d` (binary)
+
+v1(默认,hard-window 语义,用 `--temporal-threshold` 近似时间高斯核):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt /path/to/ckpt_29999.pt \
+  --output /path/to/out_v1.splat4d \
+  --splat4d-version 1
+```
+
+v2(gaussian 语义,time=mu_t,duration=sigma,更贴近 FreeTimeGS checkpoint):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt /path/to/ckpt_29999.pt \
+  --output /path/to/out_v2.splat4d \
+  --splat4d-version 2
+```
+
 ## 4D Viewer
 
 An interactive viewer for visualizing trained 4D Gaussian Splatting models with temporal animation.

@@ -111,3 +111,8 @@ python tools/exportor/export_sog4d.py \
     - v2: gaussian(time=mu_t,duration=sigma),更贴近 FreeTimeGS checkpoint.
 - 已完成对大 ckpt 的 v2 导出:
   - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`(约 81.5MB)
+
+## 2026-02-21 10:06:56 UTC
+- 更新导出说明文档,对齐当前 exporter 的真实参数名与示例命令:
+  - `README.md` 增加 `Export (Unity)` 小节,包含 `.sog4d`(bands=0/sh3)与 `.splat4d`(v1/v2)的可复制命令.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数建议,移除/标注未实现的参数,以 `--help` 为准对齐.

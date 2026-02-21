@@ -349,29 +349,81 @@ delta-v1 二进制格式要点(必须严格遵守,否则 Unity importer 会 fail
 
 ## 4. 参数建议(让脚本可调,避免硬编码)
 
-我建议 exporter 暴露下面这些参数(默认值按 FreeTimeGsVanilla 的 viewer/训练脚本对齐):
+以当前仓库已经落地的脚本为准,参数建议如下(可以直接对照 `--help`):
 
-- `--frame-count M`
+### 4.1 `.sog4d` exporter: `tools/exportor/export_sog4d.py`
+
+基础:
+- `--ckpt-path`
+- `--output-path`
+- `--frame-count`(默认 61)
 - `--time-mapping uniform|explicit`
 - `--frame-times path_or_csv`(仅 explicit)
-- `--min-sigma 0.02`
-- `--temporal-opacity-threshold 0.01`(用于可选 mask 或 debug)
-- `--base-opacity-threshold 0.0`(全局过滤,可选)
-- `--sh-bands 0..3`
-- `--sh-version 1|2`(v2=sh1/sh2/sh3)
-- `--shN-count 4096/8192`(v1)
-- `--sh-centroids-type f16|f32`
-- `--sh-labels-encoding full|delta-v1`
-- `--delta-segment-length 50`
-- `--zip-compression stored|deflated`
+- `--layout-width`
+- `--min-sigma`(默认 0.02,对齐训练/viewer 的 clamp)
+- `--overwrite`
+
+全局裁剪(必须对所有帧一致,否则会破坏 splat identity):
+- `--base-opacity-threshold`(按 base_opacity=sigmoid(logit)过滤)
+- `--max-splats`(按 base_opacity top-k 全局裁剪)
+
+每帧 alpha 的“硬置零”(对齐 Unity 运行时的 1/255 阈值):
+- `--alpha-zero-threshold`(默认 1/255)
+
+编码/体积:
+- `--webp-method`(默认 0,最快)
+- `--webp-quality`(默认 100,lossless)
+- `--zip-compression stored|deflated`(默认 stored)
+
+scale codebook:
+- `--scale-codebook-size`(默认 256)
+- `--scale-codebook-sample`(默认 200000)
+- `--assign-chunk`(默认 200000)
+
+SH0 codebook:
+- `--sh0-codebook-sample`(默认 0,使用全量 3*N 标量)
+
+SH rest(当前只实现 v1: 单一 shN palette,输出 `meta.json.version=1`):
+- `--sh-bands 0..3`(0=仅 sh0+opacity; 1..3=额外导出 shN)
+- `--shn-count`(默认 512,越大质量越好,但 kmeans 更慢)
+- `--shn-centroids-type f16|f32`(默认 f16)
+- `--shn-labels-encoding full|delta-v1`(默认 delta-v1,SH 静态时几乎零成本)
+- `--shn-codebook-sample`(默认 100000)
+- `--shn-assign-chunk`(默认 50000)
+- `--shn-kmeans-iters`(默认 10)
+
+未实现(需要后续增量开发,不要按这些参数去调用当前脚本):
+- `meta.json.version=2` 的 per-band palette(`sh1/sh2/sh3`)导出.
+- 可配置的 delta segment length(当前 delta-v1 固定写一个 segment 覆盖 `[0,frameCount)`).
+
+### 4.2 `.splat4d` exporter: `tools/exportor/export_splat4d.py`
+
+基础:
+- `--ckpt`
+- `--output`
+- `--base-opacity-threshold`
+- `--chunk-size`
+- `--min-sigma`
+
+版本语义:
+- `--splat4d-version 1|2`
+  - v1: hard-window(旧语义,用 `--temporal-threshold` 近似时间高斯核)
+  - v2: gaussian(新语义,time=mu_t,duration=sigma,更贴近 FreeTimeGS checkpoint)
+
+v1 专用:
+- `--temporal-threshold`(默认 0.01)
 
 ---
 
 ## 5. 最小验证清单(你写完 exporter 后怎么快速判定“对了”)
 
 1) 先导出一个最小配置:
-- `sh-bands=0`(只做 sh0+opacity)
-- `frame-count=5`
+- `.sog4d`:
+  - `--sh-bands 0`(只做 sh0+opacity)
+  - `--frame-count 5`
+  - 建议加 `--max-splats 50000` 做快速冒烟
+- `.splat4d`:
+  - `--splat4d-version 2`(如果你的 importer 支持 v2)
 
 2) 用 Unity importer 验证:
 - 能导入(不会在 Console 报 import error)

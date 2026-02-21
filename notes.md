@@ -272,3 +272,15 @@ python tools/exportor/export_splat4d.py \
   --output results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d \
   --splat4d-version 2
 ```
+
+
+## 2026-02-21 10:06:56 UTC 追加: 文档与参数对齐
+
+### 更新点
+- `README.md` 增加 `Export (Unity)` 小节,把 `.sog4d`/`.splat4d` 的导出方法与参数写成可复制命令.
+- `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 的“参数建议”更新为以 `--help` 为准:
+  - `.sog4d`: `--sh-bands`,`--shn-count`,`--shn-centroids-type`,`--shn-labels-encoding` 等.
+  - `.splat4d`: `--splat4d-version 1|2`.
+- 文档里明确标注尚未实现的项:
+  - `.sog4d meta.version=2` 的 per-band palette(`sh1/sh2/sh3`).
+  - 可配置的 delta segment length(当前固定 1 个 segment 覆盖全帧).
