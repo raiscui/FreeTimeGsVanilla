@@ -181,3 +181,9 @@ python tools/exportor/export_splat4d.py \
   --shn-codebook-sample 20000 \
   --shn-kmeans-iters 5
 ```
+
+## 2026-02-21 16:32:32 UTC
+- 使用 direnv 创建"私有 .envrc"(不进 git),用于本地代理与 GitHub PAT 管理.
+- 新增 `.direnv/git-askpass.sh` 并设置可执行,让 git 在非交互模式下通过 `GIT_ASKPASS` 读取 `GITHUB_TOKEN` 完成 https 认证.
+- 在 `.git/info/exclude` 追加忽略规则: `.envrc`,`.envrc.private`,`.direnv/`,`.vscode/`,避免误提交并让 `git status` 保持干净.
+- 执行 `direnv allow`,并验证 `direnv export bash` 正常导出相关环境变量.

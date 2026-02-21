@@ -661,3 +661,9 @@
   - `1f7f416` `Export: update sog4d/splat4d v2 and docs`
 - [2026-02-21 16:08:11 UTC] 已确认远端可 fast-forward:
   - `origin/main` 当前为 `911dcf4`,是本地 `HEAD` 的祖先
+
+- [2026-02-21 16:32:32 UTC] 已用 direnv 创建并启用"私有 .envrc"(不进 git):
+  - 新增(本地私有): `.envrc`, `.direnv/git-askpass.sh`
+  - `.git/info/exclude` 已忽略: `.envrc`,`.envrc.private`,`.direnv/`,`.vscode/`
+  - 已执行 `direnv allow`,并验证 `direnv export bash` 可导出 `GIT_ASKPASS/GITHUB_TOKEN` 等变量
+  - 下一步: 在 `.envrc` 填入 `GITHUB_TOKEN` 后,重试 `git push -u origin main`
