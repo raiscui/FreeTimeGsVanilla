@@ -29,6 +29,7 @@ import json
 import math
 import os
 import struct
+import warnings
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -403,9 +404,75 @@ def _flatten_sh_rest_v1(
     return sh_rest_flat, rest_coeff_count
 
 
+def _flatten_sh_rest_v2_per_band(
+    shn: np.ndarray,
+    *,
+    bands: int,
+) -> Dict[str, Tuple[np.ndarray, int]]:
+    """
+    v2: 把 checkpoint 的 `shN[N,K,3]` 按 band 拆分成多个低维向量,用于 per-band kmeans.
+
+    返回:
+    - dict,按顺序包含(取决于 bands):
+      - "sh1": ([N, 3*3], coeffCount=3)
+      - "sh2": ([N, 5*3], coeffCount=5)
+      - "sh3": ([N, 7*3], coeffCount=7)
+
+    说明:
+    - 这里假设 `shN` 的 coeff 顺序与 Unity importer 对齐:
+      l 从小到大,并且 rest coeff 的顺序为:
+        sh1(3) + sh2(5) + sh3(7) = 15(当 bands=3)
+    """
+    if not (1 <= bands <= 3):
+        raise ValueError(f"bands must be in [1,3], got {bands}")
+
+    shn = shn.astype(np.float32, copy=False)
+    n = int(shn.shape[0])
+    if shn.ndim != 3 or shn.shape[0] != n or shn.shape[2] != 3:
+        raise ValueError(f"shN must be [N,K,3], got shape={shn.shape}")
+
+    rest_coeff_total = int((bands + 1) ** 2 - 1)
+    if shn.shape[1] < rest_coeff_total:
+        raise ValueError(
+            f"shN coeff count too small: need >= {rest_coeff_total}, got {shn.shape[1]}"
+        )
+
+    sh_rest = shn[:, :rest_coeff_total, :]  # [N,restCoeffTotal,3]
+
+    out: Dict[str, Tuple[np.ndarray, int]] = {}
+    offset = 0
+
+    # sh1: l=1, coeffCount=3
+    if bands >= 1:
+        coeff_count = 3
+        band = sh_rest[:, offset : offset + coeff_count, :]
+        out["sh1"] = (band.reshape(n, coeff_count * 3), coeff_count)
+        offset += coeff_count
+
+    # sh2: l=2, coeffCount=5
+    if bands >= 2:
+        coeff_count = 5
+        band = sh_rest[:, offset : offset + coeff_count, :]
+        out["sh2"] = (band.reshape(n, coeff_count * 3), coeff_count)
+        offset += coeff_count
+
+    # sh3: l=3, coeffCount=7
+    if bands >= 3:
+        coeff_count = 7
+        band = sh_rest[:, offset : offset + coeff_count, :]
+        out["sh3"] = (band.reshape(n, coeff_count * 3), coeff_count)
+        offset += coeff_count
+
+    if offset != rest_coeff_total:
+        raise RuntimeError("internal error: per-band SH rest coeff offset mismatch")
+
+    return out
+
+
 def _build_shn_v1_codebook_and_labels(
     sh_rest_flat: np.ndarray,
     *,
+    name: str,
     shn_count: int,
     sample_size: int,
     seed: int,
@@ -443,8 +510,42 @@ def _build_shn_v1_codebook_and_labels(
     sample_idx = rng.choice(n, size=sample_n, replace=False)
     sample = x[sample_idx]
 
-    print(f"[sog4d] shN kmeans: sample={sample_n:,}, K={shn_count}, D={d}")
-    centroids, _ = kmeans2(sample, int(shn_count), iter=int(kmeans_iters), minit="points")
+    # scipy 的 kmeans2 可能出现 empty cluster,会导致码字浪费/质量变差.
+    # 这里做一个小重试,并且用可复现的 seed 控制初始化.
+    print(f"[sog4d] {name} kmeans: sample={sample_n:,}, K={shn_count}, D={d}")
+    centroids: Optional[np.ndarray] = None
+    for attempt in range(3):
+        attempt_seed = int(seed) + int(attempt)
+
+        # kmeans2 内部依赖 numpy 的全局 RNG,我们临时设置,并在 finally 恢复,避免污染外部随机状态.
+        rng_state = np.random.get_state()
+        try:
+            np.random.seed(int(attempt_seed))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                c_try, labels_try = kmeans2(
+                    sample,
+                    int(shn_count),
+                    iter=int(kmeans_iters),
+                    minit="++",
+                )
+        finally:
+            np.random.set_state(rng_state)
+
+        # 经验上: warning + unique(label)<K 基本等价于 empty cluster.
+        warned_empty = any("clusters is empty" in str(w.message) for w in caught)
+        used = int(np.unique(labels_try).size)
+        centroids = c_try
+
+        if (not warned_empty) and used == int(shn_count):
+            break
+        if attempt == 0:
+            print(f"[sog4d] {name} kmeans: empty cluster detected, retrying...")
+        print(f"[sog4d] {name} kmeans retry {attempt+1}/3: used={used}/{int(shn_count)} seed={attempt_seed}")
+
+    if centroids is None:
+        raise RuntimeError("internal error: kmeans2 returned no centroids")
+
     centroids_f32 = centroids.astype(np.float32, copy=False)
 
     # 高维数据 KDTree 可能会退化,但在 K 不太大时仍然是最省内存的稳妥做法.
@@ -520,6 +621,33 @@ def _build_label_delta_v1_static(
     return header + body
 
 
+def _build_delta_segments(
+    *,
+    frame_count: int,
+    segment_length: int,
+) -> List[Tuple[int, int]]:
+    """
+    把 `[0, frame_count)` 切成多个连续 segment.
+
+    返回: List[(startFrame, segmentFrameCount)].
+    - 第 0 段 startFrame=0
+    - 相邻段严格连续
+    - 所有 frameCount 之和等于 frame_count
+    """
+    if frame_count <= 0:
+        raise ValueError("frame_count must be > 0")
+    if segment_length <= 0:
+        raise ValueError("segment_length must be > 0")
+
+    segments: List[Tuple[int, int]] = []
+    start = 0
+    while start < int(frame_count):
+        seg_count = min(int(segment_length), int(frame_count) - start)
+        segments.append((int(start), int(seg_count)))
+        start += int(seg_count)
+    return segments
+
+
 def _apply_global_filter(
     *,
     means: np.ndarray,
@@ -592,9 +720,11 @@ def export_sog4d_from_ckpt(
     scale_codebook_sample: int,
     sh0_codebook_sample: int,
     sh_bands: int,
+    sh_version: int,
     shn_count: int,
     shn_centroids_type: Literal["f16", "f32"],
     shn_labels_encoding: Literal["full", "delta-v1"],
+    delta_segment_length: int,
     shn_codebook_sample: int,
     shn_assign_chunk: int,
     shn_kmeans_iters: int,
@@ -618,6 +748,10 @@ def export_sog4d_from_ckpt(
         raise ValueError("--webp-quality must be in [0,100]")
     if not (0 <= sh_bands <= 3):
         raise ValueError("--sh-bands must be in [0,3]")
+    if sh_version not in (1, 2):
+        raise ValueError("--sh-version must be 1 or 2")
+    if delta_segment_length < 0:
+        raise ValueError("--delta-segment-length must be >= 0")
 
     if output_path.exists():
         if overwrite:
@@ -714,55 +848,98 @@ def export_sog4d_from_ckpt(
     sh0_b = _nearest_codebook_index(sh0_codebook, sh0[:, 2])
     sh0_rgb = np.stack([sh0_r, sh0_g, sh0_b], axis=1).astype(np.uint8)  # [N,3]
 
-    # SH rest(v1) 的 palette + labels(静态).
+    # SH rest 的 palette + labels(静态).
     # 说明:
     # - FreeTimeGS 的 shN 通常不随时间变化,因此 labels 跨帧一致.
-    # - 我们优先实现 v1(single shN palette)并默认配合 delta-v1,减少 bundle 体积.
+    # - 当你希望更贴近 DualGS 一类的“多 codebook”思路时,可以用 `--sh-version 2` 导出 per-band(sh1/sh2/sh3).
+    sh_delta_segments: Optional[List[Tuple[int, int]]] = None
+    if sh_bands > 0 and shn_labels_encoding == "delta-v1":
+        seg_len = int(frame_count) if int(delta_segment_length) == 0 else int(delta_segment_length)
+        seg_len = min(int(seg_len), int(frame_count))
+        sh_delta_segments = _build_delta_segments(frame_count=int(frame_count), segment_length=int(seg_len))
+        print(f"[sog4d] sh delta segments: count={len(sh_delta_segments)}, segment_length={seg_len}")
+
+    # v1(single shN palette)
     shn_res: Optional[ShNCodebookResult] = None
     shn_centroids_bytes: Optional[bytes] = None
     shn_labels_webp_bytes: Optional[bytes] = None
-    shn_delta_bytes: Optional[bytes] = None
+
+    # v2(per-band palettes)
+    sh_bands_v2_res: Dict[str, ShNCodebookResult] = {}
+    sh_bands_v2_centroids_bytes: Dict[str, bytes] = {}
+    sh_bands_v2_labels_webp_bytes: Dict[str, bytes] = {}
+
     if sh_bands > 0:
         shn = _as_numpy_f32(splats["shN"])  # [N,K,3]
         # 注意: 全局裁剪必须对所有属性一致,因此 shN 也必须跟随 keep 掩码裁剪.
         shn = shn[keep]
 
-        sh_rest_flat, _rest_coeff_count = _flatten_sh_rest_v1(shn, bands=int(sh_bands))
-        shn_res = _build_shn_v1_codebook_and_labels(
-            sh_rest_flat,
-            shn_count=int(shn_count),
-            sample_size=int(shn_codebook_sample),
-            seed=int(seed),
-            assign_chunk=int(shn_assign_chunk),
-            kmeans_iters=int(shn_kmeans_iters),
-        )
-
-        # centroids: raw binary (little-endian,无 header)
-        if shn_centroids_type == "f16":
-            shn_centroids_bytes = shn_res.centroids_f32.astype("<f2", copy=False).tobytes(order="C")
-        elif shn_centroids_type == "f32":
-            shn_centroids_bytes = shn_res.centroids_f32.astype("<f4", copy=False).tobytes(order="C")
-        else:  # pragma: no cover
-            raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
-
-        # labels: 只要编码一次,后续按 full/delta-v1 复用.
-        shn_labels_img = _make_rgba_image_from_u16_labels(
-            shn_res.labels_u16,
-            pixel_count=pixel_count,
-            width=width,
-            height=height,
-        )
-        shn_labels_webp_bytes = _encode_webp_bytes_rgba(
-            shn_labels_img, webp_method=int(webp_method), webp_quality=int(webp_quality)
-        )
-
-        if shn_labels_encoding == "delta-v1":
-            shn_delta_bytes = _build_label_delta_v1_static(
-                segment_start_frame=0,
-                segment_frame_count=int(frame_count),
-                splat_count=int(n_total),
-                label_count=int(shn_count),
+        if int(sh_version) == 1:
+            sh_rest_flat, _rest_coeff_count = _flatten_sh_rest_v1(shn, bands=int(sh_bands))
+            shn_res = _build_shn_v1_codebook_and_labels(
+                sh_rest_flat,
+                name="shN",
+                shn_count=int(shn_count),
+                sample_size=int(shn_codebook_sample),
+                seed=int(seed),
+                assign_chunk=int(shn_assign_chunk),
+                kmeans_iters=int(shn_kmeans_iters),
             )
+
+            # centroids: raw binary (little-endian,无 header)
+            if shn_centroids_type == "f16":
+                shn_centroids_bytes = shn_res.centroids_f32.astype("<f2", copy=False).tobytes(order="C")
+            elif shn_centroids_type == "f32":
+                shn_centroids_bytes = shn_res.centroids_f32.astype("<f4", copy=False).tobytes(order="C")
+            else:  # pragma: no cover
+                raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
+
+            # labels: 只要编码一次,后续按 full/delta-v1 复用.
+            shn_labels_img = _make_rgba_image_from_u16_labels(
+                shn_res.labels_u16,
+                pixel_count=pixel_count,
+                width=width,
+                height=height,
+            )
+            shn_labels_webp_bytes = _encode_webp_bytes_rgba(
+                shn_labels_img, webp_method=int(webp_method), webp_quality=int(webp_quality)
+            )
+        else:
+            # v2: per-band(sh1/sh2/sh3)分别拟合 codebook + labels.
+            per_band = _flatten_sh_rest_v2_per_band(shn, bands=int(sh_bands))
+            for band_idx, (band_name, (band_flat, _coeff_count)) in enumerate(per_band.items()):
+                band_seed = int(seed) + int(band_idx)
+                res = _build_shn_v1_codebook_and_labels(
+                    band_flat,
+                    name=str(band_name),
+                    shn_count=int(shn_count),
+                    sample_size=int(shn_codebook_sample),
+                    seed=int(band_seed),
+                    assign_chunk=int(shn_assign_chunk),
+                    kmeans_iters=int(shn_kmeans_iters),
+                )
+                sh_bands_v2_res[str(band_name)] = res
+
+                if shn_centroids_type == "f16":
+                    sh_bands_v2_centroids_bytes[str(band_name)] = res.centroids_f32.astype(
+                        "<f2", copy=False
+                    ).tobytes(order="C")
+                elif shn_centroids_type == "f32":
+                    sh_bands_v2_centroids_bytes[str(band_name)] = res.centroids_f32.astype(
+                        "<f4", copy=False
+                    ).tobytes(order="C")
+                else:  # pragma: no cover
+                    raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
+
+                band_labels_img = _make_rgba_image_from_u16_labels(
+                    res.labels_u16,
+                    pixel_count=pixel_count,
+                    width=width,
+                    height=height,
+                )
+                sh_bands_v2_labels_webp_bytes[str(band_name)] = _encode_webp_bytes_rgba(
+                    band_labels_img, webp_method=int(webp_method), webp_quality=int(webp_quality)
+                )
 
     # -----------------------------
     # 4) 预编码静态 WebP(避免每帧重复编码)
@@ -838,9 +1015,10 @@ def export_sog4d_from_ckpt(
     eps = np.float32(1e-8)
     with zipfile.ZipFile(tmp_path, mode="w", compression=zip_comp, **zip_kwargs) as zf:
         # -----------------------------
-        # SH rest(v1) 静态文件: centroids + labels(+delta)
+        # SH rest 静态文件: centroids + labels(+delta)
         # -----------------------------
         if shn_res is not None:
+            # v1: 单一 shN palette
             # centroids 文件放在 zip 根目录,路径在 meta.json 里引用.
             if shn_centroids_bytes is None or shn_labels_webp_bytes is None:
                 raise RuntimeError("internal error: shN centroids/labels bytes missing")
@@ -853,11 +1031,52 @@ def export_sog4d_from_ckpt(
                     frame_str = _format_frame(frame_idx)
                     zf.writestr(f"frames/{frame_str}/shN_labels.webp", shn_labels_webp_bytes)
             elif shn_labels_encoding == "delta-v1":
-                # delta-v1: 只写 base labels(首帧) + 一个 delta 文件.
-                zf.writestr("frames/00000/shN_labels.webp", shn_labels_webp_bytes)
-                if shn_delta_bytes is None:
-                    raise RuntimeError("internal error: shN delta bytes missing")
-                zf.writestr("sh/shN_delta_00000.bin", shn_delta_bytes)
+                # delta-v1: 每个 segment 写 base labels(首帧) + delta 文件.
+                if sh_delta_segments is None:
+                    raise RuntimeError("internal error: sh delta segments missing")
+                for seg_start, seg_count in sh_delta_segments:
+                    frame_str = _format_frame(int(seg_start))
+                    zf.writestr(f"frames/{frame_str}/shN_labels.webp", shn_labels_webp_bytes)
+                    delta_bytes = _build_label_delta_v1_static(
+                        segment_start_frame=int(seg_start),
+                        segment_frame_count=int(seg_count),
+                        splat_count=int(n_total),
+                        label_count=int(shn_count),
+                    )
+                    zf.writestr(f"sh/shN_delta_{frame_str}.bin", delta_bytes)
+            else:  # pragma: no cover
+                raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
+
+        if sh_bands_v2_res:
+            # v2: per-band palettes(sh1/sh2/sh3)
+            for band_name, _res in sh_bands_v2_res.items():
+                centroids_bytes = sh_bands_v2_centroids_bytes.get(str(band_name))
+                labels_bytes = sh_bands_v2_labels_webp_bytes.get(str(band_name))
+                if centroids_bytes is None or labels_bytes is None:
+                    raise RuntimeError("internal error: sh band centroids/labels bytes missing")
+                zf.writestr(f"sh/{band_name}_centroids.bin", centroids_bytes)
+
+            if shn_labels_encoding == "full":
+                for frame_idx in range(int(frame_count)):
+                    frame_str = _format_frame(frame_idx)
+                    for band_name in sh_bands_v2_res.keys():
+                        labels_bytes = sh_bands_v2_labels_webp_bytes[str(band_name)]
+                        zf.writestr(f"frames/{frame_str}/{band_name}_labels.webp", labels_bytes)
+            elif shn_labels_encoding == "delta-v1":
+                if sh_delta_segments is None:
+                    raise RuntimeError("internal error: sh delta segments missing")
+                for seg_start, seg_count in sh_delta_segments:
+                    frame_str = _format_frame(int(seg_start))
+                    for band_name in sh_bands_v2_res.keys():
+                        labels_bytes = sh_bands_v2_labels_webp_bytes[str(band_name)]
+                        zf.writestr(f"frames/{frame_str}/{band_name}_labels.webp", labels_bytes)
+                        delta_bytes = _build_label_delta_v1_static(
+                            segment_start_frame=int(seg_start),
+                            segment_frame_count=int(seg_count),
+                            splat_count=int(n_total),
+                            label_count=int(shn_count),
+                        )
+                        zf.writestr(f"sh/{band_name}_delta_{frame_str}.bin", delta_bytes)
             else:  # pragma: no cover
                 raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
 
@@ -940,12 +1159,16 @@ def export_sog4d_from_ckpt(
             )
 
         # meta.json 最后写入,避免提前占位导致“需要二次重写 zip”.
+        meta_version = 2 if (int(sh_bands) > 0 and int(sh_version) == 2) else 1
+
         sh_stream: Dict[str, object] = {
             "bands": int(sh_bands),
             "sh0Path": "frames/{frame}/sh0.webp",
             "sh0Codebook": sh0_codebook.astype(np.float32).tolist(),
         }
-        if shn_res is not None:
+
+        if meta_version == 1 and shn_res is not None:
+            # v1: 单一 shN palette
             sh_stream.update(
                 {
                     "shNCount": int(shn_count),
@@ -957,19 +1180,62 @@ def export_sog4d_from_ckpt(
             if shn_labels_encoding == "full":
                 sh_stream["shNLabelsPath"] = "frames/{frame}/shN_labels.webp"
             elif shn_labels_encoding == "delta-v1":
-                sh_stream["shNDeltaSegments"] = [
-                    {
-                        "startFrame": 0,
-                        "frameCount": int(frame_count),
-                        "baseLabelsPath": "frames/00000/shN_labels.webp",
-                        "deltaPath": "sh/shN_delta_00000.bin",
-                    }
-                ]
+                if sh_delta_segments is None:
+                    raise RuntimeError("internal error: sh delta segments missing")
+                segments: List[Dict[str, object]] = []
+                for seg_start, seg_count in sh_delta_segments:
+                    frame_str = _format_frame(int(seg_start))
+                    segments.append(
+                        {
+                            "startFrame": int(seg_start),
+                            "frameCount": int(seg_count),
+                            "baseLabelsPath": f"frames/{frame_str}/shN_labels.webp",
+                            "deltaPath": f"sh/shN_delta_{frame_str}.bin",
+                        }
+                    )
+                sh_stream["shNDeltaSegments"] = segments
             else:  # pragma: no cover
                 raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
 
+        if meta_version == 2:
+            # v2: per-band palettes(sh1/sh2/sh3)
+            if not sh_bands_v2_res:
+                raise RuntimeError("internal error: sh per-band results missing")
+
+            for band_name in ("sh1", "sh2", "sh3"):
+                if band_name not in sh_bands_v2_res:
+                    continue
+
+                band_stream: Dict[str, object] = {
+                    "count": int(shn_count),
+                    "centroidsType": str(shn_centroids_type),
+                    "centroidsPath": f"sh/{band_name}_centroids.bin",
+                    "labelsEncoding": str(shn_labels_encoding),
+                }
+                if shn_labels_encoding == "full":
+                    band_stream["labelsPath"] = f"frames/{{frame}}/{band_name}_labels.webp"
+                elif shn_labels_encoding == "delta-v1":
+                    if sh_delta_segments is None:
+                        raise RuntimeError("internal error: sh delta segments missing")
+                    segments: List[Dict[str, object]] = []
+                    for seg_start, seg_count in sh_delta_segments:
+                        frame_str = _format_frame(int(seg_start))
+                        segments.append(
+                            {
+                                "startFrame": int(seg_start),
+                                "frameCount": int(seg_count),
+                                "baseLabelsPath": f"frames/{frame_str}/{band_name}_labels.webp",
+                                "deltaPath": f"sh/{band_name}_delta_{frame_str}.bin",
+                            }
+                        )
+                    band_stream["deltaSegments"] = segments
+                else:  # pragma: no cover
+                    raise ValueError(f"unknown shn_labels_encoding: {shn_labels_encoding}")
+
+                sh_stream[band_name] = band_stream
+
         meta: Dict[str, object] = {
-            "version": 1,
+            "version": int(meta_version),
             "splatCount": int(n_total),
             "frameCount": int(frame_count),
             "layout": {"type": "row-major", "width": int(width), "height": int(height)},
@@ -1002,9 +1268,11 @@ def export_sog4d_from_ckpt(
                 "alphaZeroThreshold": float(alpha_zero_threshold),
                 "zipCompression": str(zip_compression),
                 "shBands": int(sh_bands),
+                "shVersion": int(sh_version),
                 "shNCount": int(shn_count),
                 "shNCentroidsType": str(shn_centroids_type),
                 "shNLabelsEncoding": str(shn_labels_encoding),
+                "deltaSegmentLength": int(delta_segment_length),
                 "shNCodebookSample": int(shn_codebook_sample),
                 "shNAssignChunk": int(shn_assign_chunk),
                 "shNKmeansIters": int(shn_kmeans_iters),
@@ -1112,45 +1380,61 @@ def main() -> None:
         type=int,
         default=0,
         choices=[0, 1, 2, 3],
-        help="导出 SH 的 band 数(0=仅 sh0+opacity; 1..3=额外导出 shN palette+labels)",
+        help="导出 SH 的 band 数(0=仅 sh0+opacity; 1..3=额外导出 SH rest palette+labels)",
+    )
+    parser.add_argument(
+        "--sh-version",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="SH rest 的导出版本: 1=单一 shN palette(meta.version=1); 2=per-band(sh1/sh2/sh3,meta.version=2)",
     )
     parser.add_argument(
         "--shn-count",
         type=int,
         default=512,
-        help="v1: shN palette 的码字数量(1..65535).越大质量越好,但 kmeans/分配会显著更慢",
+        help="SH palette 的码字数量(1..65535).v1=shN; v2=每个 band 各一套.越大质量越好,但 kmeans/分配会显著更慢",
     )
     parser.add_argument(
         "--shn-centroids-type",
         type=str,
         default="f16",
         choices=["f16", "f32"],
-        help="v1: shN_centroids.bin 的浮点精度(默认 f16,体积更小)",
+        help="SH centroids.bin 的浮点精度(默认 f16,体积更小)",
     )
     parser.add_argument(
         "--shn-labels-encoding",
         type=str,
         default="delta-v1",
         choices=["full", "delta-v1"],
-        help="v1: labels 编码方式(默认 delta-v1,SH 静态时几乎零成本)",
+        help="labels 编码方式(默认 delta-v1,SH 静态时几乎零成本)",
+    )
+    parser.add_argument(
+        "--delta-segment-length",
+        type=int,
+        default=0,
+        help=(
+            "仅当 labels-encoding=delta-v1 时生效: 每个 segment 的帧数(0=单段覆盖全帧,兼容旧输出)."
+            "推荐值可参考 DualGS: 50"
+        ),
     )
     parser.add_argument(
         "--shn-codebook-sample",
         type=int,
         default=100_000,
-        help="v1: shN kmeans 的采样点数(越大越稳,但越慢).高质量可调到 200k+",
+        help="SH kmeans 的采样点数(越大越稳,但越慢).高质量可调到 200k+",
     )
     parser.add_argument(
         "--shn-assign-chunk",
         type=int,
         default=50_000,
-        help="v1: shN KDTree 分配 labels 的 chunk 大小(高维时建议更小,避免内存峰值)",
+        help="SH KDTree 分配 labels 的 chunk 大小(高维时建议更小,避免内存峰值)",
     )
     parser.add_argument(
         "--shn-kmeans-iters",
         type=int,
         default=10,
-        help="v1: shN kmeans 迭代次数(越大越稳,但越慢).高质量可调到 20+",
+        help="SH kmeans 迭代次数(越大越稳,但越慢).高质量可调到 20+",
     )
     parser.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
 
@@ -1180,9 +1464,11 @@ def main() -> None:
         scale_codebook_sample=int(args.scale_codebook_sample),
         sh0_codebook_sample=int(args.sh0_codebook_sample),
         sh_bands=int(args.sh_bands),
+        sh_version=int(args.sh_version),
         shn_count=int(args.shn_count),
         shn_centroids_type=args.shn_centroids_type,
         shn_labels_encoding=args.shn_labels_encoding,
+        delta_segment_length=int(args.delta_segment_length),
         shn_codebook_sample=int(args.shn_codebook_sample),
         shn_assign_chunk=int(args.shn_assign_chunk),
         shn_kmeans_iters=int(args.shn_kmeans_iters),

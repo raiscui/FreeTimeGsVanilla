@@ -284,3 +284,161 @@ python tools/exportor/export_splat4d.py \
 - 文档里明确标注尚未实现的项:
   - `.sog4d meta.version=2` 的 per-band palette(`sh1/sh2/sh3`).
   - 可配置的 delta segment length(当前固定 1 个 segment 覆盖全帧).
+
+
+## 2026-02-21 12:24:53 UTC 追加: DualGS(2409.08353)还能借鉴什么
+
+> 论文: "Robust Dual Gaussian Splatting for Immersive Human-centric Volumetric Videos" (arXiv:2409.08353)
+
+### 1) 压缩与流式播放(对我们 exporter 最直接有用)
+
+- **Segment 化(固定帧长)作为“压缩与播放”的基本单位**
+  - 论文明确把 LUT 宽度绑定到 segment 帧数,并给了一个常用值:
+    - 原文短引述: "same LUT width to be the segment frame length (50)".
+  - 启发:
+    - 我们的 `delta-v1` 也天然是 segment 结构,实现 `--delta-segment-length` 后就能对齐这种“按段随机访问/流式加载”的需求.
+
+- **SH 用 persistent codebook + delta indices**
+  - 论文描述了一种很贴近我们 `.sog4d` 的方案:
+    - 对每个 segment 做 kmeans 得到 codebook.
+    - segment 内每帧不存完整 labels,只存变化.
+  - 关键观察:
+    - 原文短引述: "only 1% ... change" (在他们设置下,SH indices 跨帧变化很少).
+  - 启发:
+    - 即使 FreeTimeGS 的 SH 通常静态,也应把 delta 基础设施做完整(多 segment),这样未来如果 SH 真随时间微调,仍可无缝扩展.
+
+- **“排序”提升图像/视频编码器压缩率**
+  - 论文在 LUT 压缩里提到对 skin Gaussians 按平均 opacity/scale 排序,以提升 2D 连续性,从而让 codec 更好压缩.
+  - 启发:
+    - 我们的 labels/indices 是写进 WebP 的 2D RG 图,也可能从“稳定一致的重排”中获益.
+    - 但这会影响 splat identity,需要同时输出 permutation 或确保 Unity 侧同样的重排,属于二期工程.
+
+### 2) 表达与优化(不一定马上落地,但值得记住)
+
+- **Dual representation(关节高斯+皮肤高斯)**
+  - 他们把运动(骨架/关节)与表面细节(皮肤/纹理)拆开,用绑定权重把 skin attach 到 joint,提升可控性与鲁棒性.
+  - 启发:
+    - 对“人”类场景,这种结构化先验可能比纯 4D 速度模型更稳.
+    - 我们当前是通用动态场景,短期不直接照搬,但可以作为“专项 human pipeline”的备选路线.
+
+- **Coarse-to-fine + ARAP 正则**
+  - 他们用更强的几何正则与分阶段优化提升跟踪稳定性.
+  - 启发:
+    - 若我们后续遇到“时间维抖动/漂移”,可能需要把 motion/shape 的约束显式写进 loss(而不是只靠渲染重建误差).
+
+### 3) 对我们这次任务的直接映射
+
+- 论文的 "four codebooks" 思路,非常贴近我们设计的 `.sog4d meta.version=2`:
+  - 把 SH rest 按 band 拆成 `sh1/sh2/sh3` 三套 palette(DC 单独处理),每套维度更低,聚类更稳.
+- 论文的 segment frame length(50) 思路,对应我们要补的:
+  - `--delta-segment-length` 把 `[0,frameCount)` 切成多个 segment.
+  - 每个 segment 写 base labels + delta 文件,为 streaming/随机访问铺路.
+
+
+## 2026-02-21 12:39:32 UTC 追加: 已落地 per-band(v2)与 delta segment length
+
+### 已实现的能力(落地到 `.sog4d` exporter)
+- `tools/exportor/export_sog4d.py` 新增:
+  - `--sh-version 1|2`
+    - 1: 单一 shN palette,输出 `meta.json.version=1`(保持旧行为)
+    - 2: per-band palettes(`sh1/sh2/sh3`),输出 `meta.json.version=2`
+  - `--delta-segment-length`
+    - 0: 单 segment 覆盖全帧(保持旧行为)
+    - >0: 按段切分并写多段 `deltaSegments`
+
+### v2(per-band)的 bundle 布局要点
+- centroids:
+  - `sh/sh1_centroids.bin`,`sh/sh2_centroids.bin`,`sh/sh3_centroids.bin`
+- delta-v1:
+  - 每个 segment 会写:
+    - base labels: `frames/{startFrame}/sh1_labels.webp` 等(只在 segment 起始帧写)
+    - delta: `sh/sh1_delta_{startFrame}.bin` 等(每个 segment 一个)
+
+### 额外稳定性改良
+- `scipy.cluster.vq.kmeans2` 在 K 较大时可能出现 empty cluster warning.
+  - exporter 侧对 SH kmeans 增加了捕获 warning + 最多 3 次重试,避免输出质量不稳.
+
+
+## 2026-02-21 13:40:00 UTC 追加: DualGS(2409.08353)在“压缩/播放”上还能借鉴的点(补充细节)
+
+> 论文: "Robust Dual Gaussian Splatting for Immersive Human-centric Volumetric Videos" (arXiv:2409.08353v1, 2024-09-12)
+
+### 1) Segment 作为压缩与播放的基本单位(更明确的动机)
+- 他们在压缩部分开头就明确:
+  - "divide the sequences into multiple segments"(按段切序列).
+  - 并给出常用值: "50 in our setting".
+- 这能解释为什么我们要把 `--delta-segment-length` 做成一等参数:
+  - segment 是 random access/流式加载的最小单元.
+  - `segmentLength=50` 在 30fps 下约 1.67s,对 VR 播放是合理的缓存粒度.
+
+### 2) Opacity/Scale 的 LUT + codec 压缩(对 `.sog4d` 更直接,但 `.splat4d` 也可借鉴)
+- 他们把 opacity 与 scaling 排成 2D LUT:
+  - height=gaussian 数量.
+  - width=segment frame length(=segment 长度).
+- 然后做一个很工程化的小技巧:
+  - "sort the LUT by the average value of each row" 来提升 2D 连续性.
+  - 再用 WebP/JPEG 压成 8-bit 图.
+- 对我们当前格式的启发:
+  - `.sog4d` 本身就是“数据图(WebP)”,可以考虑引入稳定的全局 permutation(同时写入 permutation 以保持 splatId),来进一步提升 codec 压缩率.
+  - 但这会触及 splat identity 的稳定性,属于二期工程.
+
+### 3) SH 的 persistent codebook 与“稀疏变化事件”编码(比我们当前 delta-v1 更激进)
+- 他们对 d-order(d=0,1,2,3)的 SH 係数做 kmeans 得到 4 套 codebook:
+  - "we obtain four codebooks ... of length L(8192 in our setting)".
+- 他们观察到 SH indices 的时间变化极稀疏:
+  - "only one percent ... change between adjacent frames".
+- 因此他们不是按“每帧 block”存 delta,而是存 change events:
+  - 保存四元组 `(t, d, i, k)`(帧 t, 阶 d, gaussian i, 新 index k).
+  - 并提到: order 不影响 decode,然后按前两维排序并做 length encoding.
+- 对我们 `.splat4d/.sog4d` 的启发:
+  - 我们当前 delta-v1 是 per-frame block,实现简单且可随机访问.
+  - 若未来真的遇到“SH 少量变化但帧数很长”的场景,可以考虑增加一种更紧凑的 event-delta 编码(例如 delta-v2),以进一步降低 IO.
+
+### 4) Motion 侧的压缩: R-VQ + RANS(短期不落地,但值得记下来)
+- 他们对 joint motion 做 Residual-Vector Quantization(R-VQ).
+- 对 temporal quantization(文中给了 11-bit 的设置)后,用 RANS 做无损压缩:
+  - 这说明 motion 流也可以非常小,不会成为 per-frame 资产的主要开销.
+- 对我们可能的映射:
+  - `.splat4d` 当前 4D 字段是 float32,属于“先能用”.
+  - 如果后续目标是移动端/超长序列,再考虑把 velocity/time/sigma 做定点量化 + entropy coding.
+
+
+## 2026-02-21 14:33:33 UTC 追加: 从 DualGS 压缩章节再抽取可直接复用的工程细节
+
+> 关键原文短引述(工程相关,只摘最关键的短句):
+- "each segment consisting of f frames(50 in our setting)."
+- "sort the LUT by the average value of each row."
+- "temporal quantization(11-bit in our setting)"
+- "four codebooks of length L(8192 in our setting)."
+- "save this integer quadruples (t, d, i, k)."
+
+### 1) Segment 是 IO/缓存/随机访问的最小颗粒度
+- 他们的压缩与播放器都以 segment 为基本单位,并给了常用值 50 帧(30fps 下约 1.67s).
+- 对我们最直接的映射:
+  - `.sog4d`: 已用 `deltaSegments` 对齐 segment 的概念.
+  - `.splat4d format v2`: section entry 带 `(startFrame,frameCount)` 并支持 `--delta-segment-length`.
+
+### 2) LUT 排序是“白嫖压缩率”的小技巧(但会碰到 identity 问题)
+- 他们把 opacity/scaling 排成 2D LUT(height=splatCount,width=segmentLen),再交给 WebP/JPEG.
+- 额外做了一个很工程化的技巧: 按每行平均值排序来提升 2D 连续性.
+- 对我们:
+  - `.sog4d` 的 labels/indices WebP 也可能吃到类似收益.
+  - 代价是会影响 splatId->pixel 的稳定映射,因此需要:
+    - 输出 permutation,并在 importer 侧恢复;或
+    - 仅在“完全不需要跨帧 identity”的支线格式里做.
+
+### 3) SH delta 还可以更紧凑: event stream(可作为 delta-v2)
+- 我们当前的 delta-v1 是 per-frame block,随机访问友好,实现也简单.
+- DualGS 的做法更像“事件流”:
+  - 只存首帧 indices.
+  - 后续只存变化事件 quadruples `(t,d,i,k)`(并排序+length encoding).
+- 如果未来出现“超长序列 + 少量 SH 变化”的典型场景,这条路线会明显更省 IO.
+
+### 4) Motion 压缩路线: 先量化,再无损熵编码(移动端很关键)
+- 他们对 joint motion 做 R-VQ,并明确提到:
+  - "temporal quantization(11-bit in our setting)"
+  - 使用 RANS 做 lossless 压缩
+- 对 `.splat4d` 的映射建议:
+  - 可以保持 format v2 的 section 机制不变,增加一个可选的 motion 压缩 section:
+    - velocity/time/sigma 做定点量化(例如 10-16 bit),再做熵编码.
+  - 这样可以在不破坏现有 float32 路径的情况下,逐步逼近“低端设备可播”的目标.

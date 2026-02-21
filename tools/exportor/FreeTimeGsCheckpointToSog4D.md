@@ -383,18 +383,22 @@ scale codebook:
 SH0 codebook:
 - `--sh0-codebook-sample`(默认 0,使用全量 3*N 标量)
 
-SH rest(当前只实现 v1: 单一 shN palette,输出 `meta.json.version=1`):
+SH rest(v1/v2,由 `--sh-version` 控制):
 - `--sh-bands 0..3`(0=仅 sh0+opacity; 1..3=额外导出 shN)
+- `--sh-bands 0..3`(0=仅 sh0+opacity; 1..3=额外导出 SH rest)
+- `--sh-version 1|2`
+  - 1: 单一 palette(shN),输出 `meta.json.version=1`
+  - 2: per-band palettes(sh1/sh2/sh3),输出 `meta.json.version=2`
 - `--shn-count`(默认 512,越大质量越好,但 kmeans 更慢)
 - `--shn-centroids-type f16|f32`(默认 f16)
 - `--shn-labels-encoding full|delta-v1`(默认 delta-v1,SH 静态时几乎零成本)
+- `--delta-segment-length`(默认 0=单 segment 覆盖全帧; 推荐可参考 DualGS=50)
 - `--shn-codebook-sample`(默认 100000)
 - `--shn-assign-chunk`(默认 50000)
 - `--shn-kmeans-iters`(默认 10)
 
-未实现(需要后续增量开发,不要按这些参数去调用当前脚本):
-- `meta.json.version=2` 的 per-band palette(`sh1/sh2/sh3`)导出.
-- 可配置的 delta segment length(当前 delta-v1 固定写一个 segment 覆盖 `[0,frameCount)`).
+说明:
+- 当 `--shn-labels-encoding=delta-v1` 且 `--delta-segment-length>0` 时,exporter 会把 `[0,frameCount)` 切成多个 segment 并写入多段 `deltaSegments`.
 
 ### 4.2 `.splat4d` exporter: `tools/exportor/export_splat4d.py`
 
@@ -405,13 +409,34 @@ SH rest(当前只实现 v1: 单一 shN palette,输出 `meta.json.version=1`):
 - `--chunk-size`
 - `--min-sigma`
 
+文件格式版本:
+- `--splat4d-format-version 1|2`
+  - 1: legacy(无 header,64B/record),仅承载 SH0 与 4D 字段,兼容旧 importer.
+  - 2: header+sections,用于承载 gaussian 时间核与 SH rest(per-band/deltaSegments).
+
 版本语义:
 - `--splat4d-version 1|2`
   - v1: hard-window(旧语义,用 `--temporal-threshold` 近似时间高斯核)
   - v2: gaussian(新语义,time=mu_t,duration=sigma,更贴近 FreeTimeGS checkpoint)
 
 v1 专用:
-- `--temporal-threshold`(默认 0.01)
+- `--temporal-threshold`(默认 0.01,用于把 sigma 近似为窗口)
+
+v2(gaussian)补充:
+- `--temporal-threshold` 会作为 runtime 的 gaussian cutoff 写入 `.splat4d v2` meta.
+  - 例如 0.01 表示当 temporalWeight < 0.01 时视为不可见(同时也用于 bounds padding 的保守估算).
+
+SH rest(可选,需要 `--splat4d-format-version 2`):
+- `--sh-bands 0..3`(默认 0)
+- `--shn-count`(默认 512)
+- `--shn-centroids-type f16|f32`(默认 f16)
+- `--shn-labels-encoding full|delta-v1`(默认 delta-v1)
+- `--frame-count`(当 labelsEncoding=delta-v1 时必填)
+- `--delta-segment-length`(默认 0=单 segment 覆盖全帧; 推荐可参考 DualGS=50)
+- `--shn-codebook-sample`(默认 100000)
+- `--shn-assign-chunk`(默认 200000)
+- `--shn-kmeans-iters`(默认 10)
+- `--seed`(默认 12345)
 
 ---
 

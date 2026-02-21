@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## 关联项目
+`/workspace/gsplat-unity`
+这个gsplat-unity 是 gsplat 的显示解码项目, 这个项目计算生成的4dgsplat, 要能使用 gsplat-unity 在unity中 加载 并解码播放,如果 编码在 本项目中更改,那么 gsplat-unity 的解码要做对应变更.
+
+
 ## proxy
 - 运行网络命令前要注册代理: `export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 all_proxy=socks5://127.0.0.1:7897`
 

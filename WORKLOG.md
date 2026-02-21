@@ -116,3 +116,68 @@ python tools/exportor/export_sog4d.py \
 - 更新导出说明文档,对齐当前 exporter 的真实参数名与示例命令:
   - `README.md` 增加 `Export (Unity)` 小节,包含 `.sog4d`(bands=0/sh3)与 `.splat4d`(v1/v2)的可复制命令.
   - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数建议,移除/标注未实现的参数,以 `--help` 为准对齐.
+
+## 2026-02-21 12:39:32 UTC
+- 参考 DualGS(2409.08353)补齐 `.sog4d` exporter 的两项能力:
+  - per-band SH rest(v2): `--sh-version 2` 输出 `meta.json.version=2`,并生成 `sh1/sh2/sh3` 三套 palette + labels.
+  - 可配置 delta segment length: `--delta-segment-length` 控制 delta-v1 的 segment 切分(0=保持旧行为: 单段覆盖全帧).
+- `.sog4d` v2(per-band)输出布局要点:
+  - centroids: `sh/sh1_centroids.bin`,`sh/sh2_centroids.bin`,`sh/sh3_centroids.bin`
+  - delta-v1:
+    - base labels: 只在 segment 起始帧写 `frames/{startFrame}/sh1_labels.webp` 等
+    - delta: `sh/sh1_delta_{startFrame}.bin` 等(每段 1 个)
+- 稳定性改良:
+  - SH kmeans 捕获 scipy empty cluster warning 并最多重试 3 次,避免导出质量不稳/终端噪声.
+- 文档同步:
+  - `README.md` 增加 per-band(v2)导出示例.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数表,移除“未实现”标注并补 `--sh-version/--delta-segment-length`.
+
+验证:
+```bash
+python -m compileall -q src datasets tools/exportor
+python -c "import torch, gsplat; print('ok')"
+
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output-path results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_f3_k50k_sh3_perband_seg2_retry.sog4d \
+  --frame-count 3 \
+  --layout-width 1024 \
+  --max-splats 50000 \
+  --sh-bands 3 \
+  --sh-version 2 \
+  --shn-count 64 \
+  --shn-labels-encoding delta-v1 \
+  --delta-segment-length 2 \
+  --shn-codebook-sample 20000 \
+  --shn-kmeans-iters 5 \
+  --zip-compression stored \
+  --overwrite
+```
+
+## 2026-02-21 14:33:33 UTC
+- 升级 `.splat4d` exporter 支持 format v2(header+sections),用于把 `.sog4d v2` 的两项能力带到 `.splat4d`:
+  - per-band SH rest(`sh1/sh2/sh3`): `--sh-bands 1..3` 导出每个 band 的 codebook(centroids)与 base labels(u16).
+  - deltaSegments(可配置段长): `--shn-labels-encoding delta-v1` + `--frame-count` + `--delta-segment-length` 写入多段 delta blocks(一期默认 updateCount=0,为未来 SH 动态变化铺路).
+- 已完成冒烟导出+解析校验:
+  - 输出: `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_v2_sh3_seg10_op99_k64.splat4d`
+  - 校验: header/section table 与数据体一致(sectionCount=47; RECS bytes=splatCount*64; delta magic=`SPL4DLB1`).
+
+复现命令:
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_v2_sh3_seg10_op99_k64.splat4d \
+  --splat4d-format-version 2 \
+  --splat4d-version 2 \
+  --base-opacity-threshold 0.99 \
+  --sh-bands 3 \
+  --frame-count 61 \
+  --shn-count 64 \
+  --shn-centroids-type f16 \
+  --shn-labels-encoding delta-v1 \
+  --delta-segment-length 10 \
+  --shn-codebook-sample 20000 \
+  --shn-kmeans-iters 5
+```

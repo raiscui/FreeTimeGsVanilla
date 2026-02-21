@@ -316,28 +316,67 @@ python tools/exportor/export_sog4d.py \
   --overwrite
 ```
 
+含 SH rest(per-band,meta.version=2 + delta-v1,推荐):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_sog4d.py \
+  --ckpt-path /path/to/ckpt_29999.pt \
+  --output-path /path/to/out_sh3_perband.sog4d \
+  --frame-count 61 \
+  --layout-width 2048 \
+  --sh-bands 3 \
+  --sh-version 2 \
+  --shn-count 512 \
+  --shn-centroids-type f16 \
+  --shn-labels-encoding delta-v1 \
+  --delta-segment-length 50 \
+  --zip-compression stored \
+  --overwrite
+```
+
 备注:
 - `--shn-count` 越大,SH 质量通常越好,但导出会明显变慢(因为 CPU kmeans + labels 分配).
 - 快速验证可以加 `--max-splats 50000` 先做冒烟包.
 
 ### Export `.splat4d` (binary)
 
-v1(默认,hard-window 语义,用 `--temporal-threshold` 近似时间高斯核):
+legacy v1(无 header,兼容旧 importer,只含 SH0; time=window):
 ```bash
 source .venv/bin/activate
 python tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v1.splat4d \
+  --splat4d-format-version 1 \
   --splat4d-version 1
 ```
 
-v2(gaussian 语义,time=mu_t,duration=sigma,更贴近 FreeTimeGS checkpoint):
+v2(有 header+sections,支持 gaussian 时间核与 SH rest):
+
+仅 gaussian 时间核(不导出 SH rest):
 ```bash
 source .venv/bin/activate
 python tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2.splat4d \
+  --splat4d-format-version 2 \
   --splat4d-version 2
+```
+
+v2 + per-band SH rest(sh1/sh2/sh3) + deltaSegments(分段长度参考 DualGS=50):
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt /path/to/ckpt_29999.pt \
+  --output /path/to/out_v2_sh3.splat4d \
+  --splat4d-format-version 2 \
+  --splat4d-version 2 \
+  --temporal-threshold 0.01 \
+  --sh-bands 3 \
+  --frame-count 61 \
+  --shn-count 512 \
+  --shn-centroids-type f16 \
+  --shn-labels-encoding delta-v1 \
+  --delta-segment-length 50
 ```
 
 ## 4D Viewer

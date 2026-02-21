@@ -469,3 +469,180 @@
   - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新参数建议为以 `--help` 为准,并标注未实现项.
 - [2026-02-21 10:07:59 UTC] 已完成 git 提交:
   - commit: `981f0d1`
+
+
+# 任务计划: 参考 DualGS(2409.08353)实现 SH per-band(v2)与可配置 delta segment length
+
+## 目标
+在 `tools/exportor/export_sog4d.py` 落地两项能力,用于更贴近 DualGS 的压缩思路,并为 Unity 侧 streaming/随机访问做准备:
+- SH rest 支持 per-band palette(`sh1/sh2/sh3`),输出 `meta.json.version=2`.
+- delta-v1 支持按 segment 切分,可配置 `delta segment length`,输出多段 `deltaSegments`.
+
+## 阶段
+- [x] 阶段1: 计划和约束确认(明确 `.sog4d` v1/v2 与 `.splat4d` 的边界)
+- [x] 阶段2: 论文要点摘录(提炼 DualGS 可借鉴点并落到 notes.md)
+- [x] 阶段3: 代码实现(exporter v2 per-band + segment delta)
+- [x] 阶段4: 冒烟验证(小帧数+小 splat 数,验证 meta 与文件产物一致)
+- [x] 阶段5: 文档与四文件回写(README/FreeTimeGsCheckpointToSog4D.md/WORKLOG/notes/LATER_PLANS)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(更贴近论文,更可扩展)
+- per-band v2 + delta-v1 全实现:
+  - 每个 segment 写 base labels(首帧) + delta 文件.
+  - delta body 按“与上一帧不同的 splatId/newLabel”写 update.
+- 优点: 真正支持 SH 随时间变化(论文提到仅约 1% 变化),segment 可随机访问.
+- 代价: 需要实现 per-frame labels 的生成/对比(当前 FreeTimeGS 通常是静态 SH,短期收益有限).
+
+### 方向B: 先能用,后面再优雅(本次落地,风险最小)
+- per-band v2 + segment delta-v1(静态 SH 语义):
+  - labels 仍按“静态”处理(跨帧一致).
+  - delta 文件按 segment 切分,每帧 updateCount=0.
+- 优点: 立刻获得 per-band(质量/聚类更稳)与 segment 切分(满足格式/streaming 需求).
+- 代价: 若未来 SH 真随时间变化,仍需补方向A 的 update 生成逻辑.
+
+## 关键问题
+1. 你本次提到的 "splat4d per-band/delta segment" 更像是 `.sog4d` 的能力(因为 `.splat4d` 是 64B/record 的无头二进制,目前只能承载 SH0).
+2. Unity importer 是否已支持:
+   - `meta.json.version=2` 的 `streams.sh.sh1/sh2/sh3`.
+   - `labelsEncoding="delta-v1"` 的多段 `deltaSegments`.
+3. `delta segment length` 的默认值是否要对齐论文的 50,还是保持当前“1 段覆盖全帧”的行为以保证兼容.
+
+## 做出的决定
+- [2026-02-21 12:24:53 UTC] 先落地方向B:
+  - 理由: FreeTimeGS 的 SH 通常静态,delta-v1 的 update 基本为 0,优先把 per-band 与 segment 基础设施打通.
+  - 默认兼容: `--delta-segment-length` 默认保持“单 segment 覆盖全帧”,避免无意改变旧输出.
+
+## 状态
+**目前在阶段5**: 已完成交付.代码+文档+四文件均已回写,并完成冒烟验证。
+
+## 状态更新
+- [2026-02-21 12:39:32 UTC] 已完成实现:
+  - `tools/exportor/export_sog4d.py` 新增 `--sh-version 1|2`,`--delta-segment-length`.
+  - `meta.json.version=2` 支持 per-band palettes(`sh1/sh2/sh3`),并按 spec 写入 `deltaSegments`.
+  - delta-v1 支持多 segment,并保持默认 `0=单 segment 覆盖全帧` 的兼容行为.
+  - SH kmeans 增加 empty cluster 捕获与重试,提升稳定性.
+- [2026-02-21 12:39:32 UTC] 已完成验证与文档回写:
+  - `python -m compileall` 通过,并导出 v1/v2 冒烟 `.sog4d` 验证 meta.json 与 zip 内容一致.
+  - `README.md`,`tools/exportor/FreeTimeGsCheckpointToSog4D.md`,`notes.md`,`WORKLOG.md`,`LATER_PLANS.md`,`task_plan.md` 已同步更新.
+
+
+# 任务计划: 升级 `.splat4d`(v2)以对齐 `.sog4d v2` 的能力(per-band SH + deltaSegments)
+
+## 目标
+让 `.splat4d` 同时具备:
+- SH rest 的 per-band 量化与存储(`sh1/sh2/sh3`).
+- 可配置的 delta segment length(用于 labels 的分段与随机访问/流式基础设施).
+- 明确且可版本化的文件格式,并与 Unity 侧 importer/runtime 行为一致(包含时间核语义).
+
+## 阶段
+- [x] 阶段1: 计划与格式设计(含向后兼容策略)
+- [x] 阶段2: 论文要点补充摘录(DualGS 压缩/播放链路还能借鉴什么)
+- [x] 阶段3: FreeTimeGsVanilla exporter 落地(`export_splat4d.py`)
+- [x] 阶段4: Unity importer/runtime 落地(`gsplat-unity`)
+- [x] 阶段5: 冒烟验证 + 文档/四文件回写
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,单文件+可扩展)
+- 设计 `.splat4d` v2: 以 header + section table 的方式扩展单文件格式.
+- 在 Unity importer 里同时支持:
+  - v1(无 header,64B/record).
+  - v2(有 header,包含 SH per-band 与 deltaSegments).
+- 时间核语义显式化:
+  - window(time0+duration)与 gaussian(mu+sigma)二选一,避免 exporter/runtime 口径不一致.
+- 优点:
+  - 结构可扩展,后续加 streaming/更多属性不会再破坏格式.
+  - 单文件分发更顺手,也更接近 `.sog4d` 的 bundle 体验.
+- 代价:
+  - Unity importer/runtime 必须同步升级.
+
+### 方向B: 先能用,后面再优雅(多文件 sidecar,改动小)
+- 保持 `.splat4d` 仍为 v1 record 数组.
+- 额外输出 sidecar:
+  - `xxx.splat4d.meta.json`
+  - `xxx.splat4d.sh1_centroids.bin`/`sh1_labels.bin`/`sh1_delta_*.bin` 等
+- Unity importer 通过约定路径一起加载.
+- 优点:
+  - 不需要改动 `.splat4d` 本体,实现更快.
+- 代价:
+  - 多文件生命周期管理麻烦,更容易丢文件/路径错.
+  - 后续想要 streaming 时仍要再补“bundle化”工作.
+
+## 关键问题
+1. `.splat4d v1` 是无 header 的 64B record 数组,如何在不破坏兼容的情况下增加 SH 与 deltaSegments?
+2. Unity 侧目前按 hard-window(time0+duration)做可见性裁剪与排序,而 FreeTimeGS checkpoint 的时间核是 gaussian(mu+sigma).升级后必须口径一致.
+3. deltaSegments 是基于离散 frame 的概念,而 `.splat4d` 的播放时间是归一化连续值.需要明确 timeMapping 与 frameIndex 的映射策略(即使一期先不做真正的 SH 随时间更新,也要把格式铺好).
+
+## 做出的决定
+- [2026-02-21 13:40:00 UTC] 选择方向A:
+  - 理由: 用户目标是“升级 `.splat4d` 并对齐 `.sog4d v2` 能力”,单文件+可版本化最不易腐化.
+  - 兼容策略: Unity importer 通过 magic 检测 v2,否则回退 v1 解析.
+- [2026-02-21 13:40:00 UTC] delta-v1 一期先实现“静态 labels”(updateCount=0)与可配置 segment 切分:
+  - 理由: FreeTimeGS 的 `shN` 通常静态,先把基础设施打通,后续再补“真实 changed label”生成逻辑.
+
+## 状态
+**目前在阶段5**: 已完成冒烟验证,并完成文档/四文件回写.
+
+## 状态更新
+- [2026-02-21 14:10:00 UTC] 已完成 `.splat4d v2` 格式与实现落地:
+  - FreeTimeGsVanilla: `tools/exportor/export_splat4d.py` 支持:
+    - `--splat4d-format-version 2`(header+sections)
+    - per-band SH(`--sh-bands 1..3`,导出 `sh1/sh2/sh3` centroids+labels+deltaSegments)
+    - `--delta-segment-length`(分段长度,0=单段覆盖全帧)
+  - Unity(gsplat-unity):
+    - `Editor/GsplatSplat4DImporter.cs` 支持 v1/v2 `.splat4d` 导入,并在 v2 下解码 SH rest.
+    - `Runtime/Shaders/Gsplat.compute`/`Runtime/Shaders/Gsplat.shader` 增加 `TimeModel=window|gaussian` 与 `TemporalCutoff`,并实现 gaussian 时间核的可见性与平滑淡入淡出.
+    - `Runtime/GsplatSortPass.cs`/`Runtime/GsplatSorter.cs`/`Runtime/GsplatRendererImpl.cs` 补齐新 uniform 传参链路.
+- [2026-02-21 14:10:00 UTC] 已完成一次冒烟导出(含 SH3 + deltaSegments):
+  - 输出: `results/bar-release_result_run2/exports_smoke/ckpt_29999_v2_sh3_seg10.splat4d`
+  - 参数: `--shn-count 64 --delta-segment-length 10 --frame-count 61 --splat4d-version 2 --splat4d-format-version 2`
+- [2026-02-21 14:33:33 UTC] 已完成本仓库侧冒烟验证(导出+解析校验):
+  - 导出: `results/bar_release_full/out_0_61/exports_smoke/ckpt_29999_v2_sh3_seg10_op99_k64.splat4d`
+  - 解析校验(用 Python 直接读取 header/section table):
+    - header: `magic=SPL4DV02`, `sectionCount=47`, `splatCount=91596`, `shBands=3`, `timeModel=2`, `frameCount=61`
+    - sections: `RECS=1`,`META=1`,`SHCT=3`,`SHLB=21`,`SHDL=21`
+    - RECS: `length == splatCount * 64`
+    - delta: magic=`SPL4DLB1`,header 中的 `(segmentStartFrame,segmentFrameCount)` 与 section entry 一致
+
+
+# 任务计划: 配置 Git 远端并推送到 raiscui/FreeTimeGsVanilla
+
+## 目标
+把当前 `main` 分支的最新提交与本次未提交改动,推送到 `https://github.com/raiscui/FreeTimeGsVanilla.git`.
+同时保留原上游远端,用于后续同步.
+
+## 阶段
+- [ ] 阶段1: 计划和设置
+- [ ] 阶段2: 确认变更范围
+- [ ] 阶段3: 提交本地变更
+- [ ] 阶段4: 配置远端并 push
+- [ ] 阶段5: 验证远端状态
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,符合 fork/upstream 习惯)
+- 将当前 `origin` 重命名为 `upstream`(保留原仓库 `OpsiClear/FreeTimeGsVanilla`).
+- 新增 `origin` 指向 `raiscui/FreeTimeGsVanilla`.
+- 之后 `main` 跟踪 `origin/main`,需要同步上游时用 `upstream`.
+
+### 方向B: 先能用,后面再优雅(改动最少)
+- 保持现有 `origin` 不变.
+- 新增一个新远端名(如 `raiscui`)指向你的仓库.
+- push 时显式 `git push raiscui main`.
+
+## 关键问题
+1. 本次提交是否包含 `.codex/` 与 `openspec/config.yaml` 这类“开发工作流”文件?
+2. 是否需要把 `.vscode/settings.json` 这类个人 IDE 外观配置一并推送?
+
+## 做出的决定
+- [2026-02-21 16:06:41 UTC] 选择方向A:
+  - 理由: 让后续 push 默认指向你的仓库,同时保留上游用于同步.
+  - 操作: `origin -> upstream`,新增 `origin=https://github.com/raiscui/FreeTimeGsVanilla.git`.
+- [2026-02-21 16:06:41 UTC] 提交范围策略:
+  - 代码/文档/四文件上下文(`task_plan.md`,`notes.md`,`WORKLOG.md`,`LATER_PLANS.md`)全部纳入提交.
+  - `.codex/` 与 `openspec/config.yaml` 作为项目工作流辅助文件一并纳入.
+  - `.vscode/settings.json` 暂不提交(纯外观配置,容易污染团队仓库).
+
+## 状态
+**目前在阶段1**: 已读取 git 状态,已追加本任务记录,准备开始配置远端与提交/push.

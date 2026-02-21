@@ -21,8 +21,13 @@
   - 校验 per-frame 文件存在性与尺寸(抽样验证 1-2 帧即可).
   - 校验 `meta.json.streams.*` 关键字段长度与 frameCount 一致.
 
-## 2026-02-21 09:45:50 UTC
-- `.sog4d` exporter 后续可升级实现 `meta.json.version=2` 的 per-band palette:
-  - `sh1/sh2/sh3` 分别拟合 codebook + labels(delta-v1),质量与码率通常更好.
-- scipy `kmeans2` 可能出现 empty cluster 的 warning:
-  - 可考虑增加 retry(重采样/换 seed)或 fallback(自动降 `shn_count`),让默认行为更“稳”.
+## 2026-02-21 12:39:32 UTC
+- 若后续希望更贴近 DualGS(2409.08353)的压缩/流式策略,可以增量实现:
+  - delta-v1 生成真实 update: 对比相邻帧 labels,只写 changed 的 `(splatId,newLabel)`(当前我们主要覆盖 FreeTimeGS 常见的“静态 SH”场景).
+  - per-segment codebook: 当前 exporter 的 SH codebook 是全局静态,而 DualGS 在每个 segment 内做聚类以更贴合局部统计.
+  - 稳定 permutation/reorder: 参考论文的“排序提升 codec 压缩率”思路,对 labels/indices 的 2D 图做一致性重排以提升 WebP/zip 压缩(需要同时保证 splat identity 或输出 permutation 给 importer).
+
+## 2026-02-21 14:33:33 UTC
+- DualGS 的两条“二期压缩路线”(对齐低端设备/超长序列)可以作为后续迭代方向:
+  - SH change events: 用 quadruples `(t,d,i,k)` + sort + length encoding 代替 per-frame block,可作为 delta-v2.
+  - Motion: R-VQ + "temporal quantization(11-bit in our setting)" + RANS(lossless),可考虑给 `.splat4d format v2` 增加可选的 motion 压缩 section.
