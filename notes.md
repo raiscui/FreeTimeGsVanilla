@@ -246,3 +246,29 @@ python tools/exportor/export_sog4d.py \
 - `results/bar-release_result_run2/ckpts/ckpt_29999.pt`:
   - `n_gaussians=199,958`(文件约 147MB)
 - 两者 step 都是 29999,但训练时的初始化/采样密度不同,导致最终点数差距很大.
+
+
+## 2026-02-21 09:57:20 UTC 追加: `.splat4d` exporter 支持 v2(gaussian 时间核)
+
+### 背景
+- `tools/exportor/export_splat4d.py` 原本只有 v1 语义:
+  - 把 FreeTimeGS 的时间高斯核近似成 hard window(time0+duration).
+- 但 FreeTimeGS 的 checkpoint 本身就是高斯时间核(更准确).
+  - 因此新增 v2 语义,直接写入 `mu_t` 与 `sigma`,让 runtime 侧可直接算 `exp(-0.5 * ((t - mu)/sigma)^2)`.
+
+### 新增 CLI
+- `--splat4d-version 1|2`
+  - v1: hard window(保持兼容,仍使用 `--temporal-threshold`).
+  - v2: gaussian(time=mu_t,duration=sigma),会忽略 `--temporal-threshold`.
+
+### 实际导出(你指定的大 ckpt, v2)
+- 输出:
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`(约 81.5MB)
+- 命令:
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d \
+  --splat4d-version 2
+```

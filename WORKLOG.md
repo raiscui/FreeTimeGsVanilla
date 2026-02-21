@@ -103,3 +103,11 @@ python tools/exportor/export_sog4d.py \
   --zip-compression stored \
   --overwrite
 ```
+
+## 2026-02-21 09:57:20 UTC
+- 扩展 `.splat4d` exporter 支持 v2(gaussian 时间核语义):
+  - `tools/exportor/export_splat4d.py` 新增 `--splat4d-version 1|2`.
+    - v1: hard window(保持兼容).
+    - v2: gaussian(time=mu_t,duration=sigma),更贴近 FreeTimeGS checkpoint.
+- 已完成对大 ckpt 的 v2 导出:
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`(约 81.5MB)

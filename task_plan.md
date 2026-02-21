@@ -385,3 +385,44 @@
   - `results/bar_release_full/out_0_61/exports/ckpt_29999_f61_full_sh3_v1delta_k512.sog4d`
 - [2026-02-21 09:49:05 UTC] 已完成回写与 git 提交:
   - commit: `23da9b7`
+
+# 任务计划: `export_splat4d.py` 支持 v2(高斯时间核语义)
+
+## 目标
+扩展 `tools/exportor/export_splat4d.py`,支持输出 `.splat4d` v2:
+- v1(保持兼容): hard window 语义.
+  - `time=time0`,`duration=window_length`.
+  - 通过 `--temporal-threshold` 把 FreeTimeGS 的高斯时间核近似成窗口.
+- v2(新增): Gaussian 语义(更贴近 FreeTimeGS checkpoint).
+  - `time=mu_t`(checkpoint 的 `times`)
+  - `duration=sigma`(=exp(checkpoint 的 `durations`),并 clamp `min_sigma`)
+  - runtime 侧可直接用 `exp(-0.5 * ((t - mu_t)/sigma)^2)` 做 temporal opacity.
+
+## 阶段
+- [x] 阶段1: 计划与约束确认(明确 v1/v2 的字段语义)
+- [x] 阶段2: 实现 v2 导出(新增 CLI 参数,并保持 v1 不变)
+- [x] 阶段3: 冒烟导出与 sanity check(文件大小/写入进度/基本统计)
+- [ ] 阶段4: 文档与提交(四文件回写 + git commit)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐)
+- exporter 同时支持 v1/v2,并在 CLI help 与 docstring 里写清楚:
+  - 什么时候该用 v1(旧 importer 仅支持窗口).
+  - 什么时候该用 v2(新 importer 支持高斯核,更准确).
+- 额外做一个最小 sanity check:
+  - 打印 times/sigma 的 min/max,让用户能快速判断是否存在异常 outlier.
+
+### 方向B: 先能用,后面再优雅
+- 只加一个 `--splat4d-version 2`,其余先不改,不补输出解释.
+
+## 做出的决定
+- [2026-02-21 09:57:20 UTC] 选择方向A: 同时支持 v1/v2,并补清晰的 CLI 文档与最小 sanity 输出.
+
+## 状态
+**目前在阶段4**: 已完成实现与冒烟导出,准备回写与 git 提交.
+
+## 状态更新
+- [2026-02-21 09:57:20 UTC] 已完成实现与冒烟导出:
+  - `tools/exportor/export_splat4d.py` 新增 `--splat4d-version 1|2`(v2=gaussian time kernel).
+  - 产物: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian.splat4d`

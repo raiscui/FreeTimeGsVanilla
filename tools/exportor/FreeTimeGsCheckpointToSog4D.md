@@ -386,12 +386,14 @@ delta-v1 二进制格式要点(必须严格遵守,否则 Unity importer 会 fail
 ## 6. 额外建议(我认为你后面一定会用到)
 
 - `.sog4d` 是“逐帧 keyframe”格式.
-  如果你最终目标是“连续 4D 运动 + 硬窗口”,`.splat4d` 反而更直接.
+  如果你最终目标是“连续 4D 运动”,`.splat4d` 反而更直接.
   你可以同时输出两份:
-  - `.splat4d`: 用于 runtime 4DGS 主后端(速度+时间窗)
+  - `.splat4d`: 用于 runtime 4DGS 主后端(速度+时间核)
+    - v1: hard window(旧语义,time0+duration).
+    - v2: gaussian(新语义,time=mu_t,duration=sigma),更贴近 FreeTimeGS checkpoint.
+    - exporter: `python tools/exportor/export_splat4d.py --splat4d-version 2 ...`
   - `.sog4d`: 用于逐帧对照,或用于需要全属性插值的工作流
 
 - 由于 FreeTimeGS 的 SH 通常是静态的:
   - 建议优先用 `delta-v1`.
   - 你几乎免费就能获得很好的压缩比(大量 updateCount=0).
-

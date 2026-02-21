@@ -21,13 +21,27 @@
 - FreeTimeGS 的 temporal opacity 是高斯核:
     temporal_opacity(t) = exp(-0.5 * ((t - mu_t) / s)^2)
   其中 mu_t=times, s=exp(durations).
-- `.splat4d` 当前是“硬窗口”语义:
+
+本脚本支持两种版本(由 `--splat4d-version` 控制):
+
+## v1: hard window 语义(保持兼容,旧 importer 常见)
+- `.splat4d` 解释为“硬窗口”:
     visible iff time0 <= t <= time0 + duration
-- 本脚本默认用 `temporal_threshold` 把高斯核裁成硬窗口:
+- 用 `--temporal-threshold` 把 FreeTimeGS 的高斯核近似成硬窗口:
     half_width = s * sqrt(-2 * ln(threshold))
     window = [mu_t - half_width, mu_t + half_width]
-  然后把 `.splat4d` 的 time0 写成窗口起点, duration 写成窗口长度.
-  同时把 position 平移到 time0 时刻,保证运动轨迹一致.
+- 写入:
+  - `time=time0`(窗口起点)
+  - `duration=window_length`
+  - `position` 平移到 time0 时刻,保证线性运动轨迹一致.
+
+## v2: Gaussian 语义(新增,更贴近 FreeTimeGS checkpoint)
+- `.splat4d` 直接表达 FreeTimeGS 的时间高斯核:
+    temporal_opacity(t) = exp(-0.5 * ((t - mu_t) / sigma)^2)
+- 写入:
+  - `time=mu_t`(checkpoint 的 times)
+  - `duration=sigma`(=exp(checkpoint 的 durations),并 clamp `min_sigma`)
+  - `position` 直接使用 checkpoint 的 means(它本来就是 mu_t 时刻的位置)
 """
 
 from __future__ import annotations
@@ -42,6 +56,14 @@ import torch
 
 
 SH_C0: float = 0.28209479177387814
+
+
+def _safe_f32(x: np.ndarray, *, default: float) -> np.ndarray:
+    """
+    把非有限值(nan/inf)替换为 default,避免导出结果出现不可读数据.
+    """
+    x = x.astype(np.float32, copy=False)
+    return np.where(np.isfinite(x), x, np.float32(default)).astype(np.float32)
 
 
 def _stable_sigmoid(x: np.ndarray) -> np.ndarray:
@@ -123,13 +145,16 @@ def export_splat4d_from_ckpt(
     *,
     ckpt_path: Path,
     output_path: Path,
+    splat4d_version: int,
     temporal_threshold: float,
     min_sigma: float,
     chunk_size: int,
     base_opacity_threshold: float,
 ) -> None:
-    if not (0.0 < temporal_threshold < 1.0):
-        raise ValueError("--temporal-threshold must be in (0, 1)")
+    if splat4d_version not in (1, 2):
+        raise ValueError("--splat4d-version must be 1 or 2")
+    if splat4d_version == 1 and not (0.0 < temporal_threshold < 1.0):
+        raise ValueError("--temporal-threshold must be in (0, 1) for splat4d-version=1")
     if min_sigma <= 0.0:
         raise ValueError("--min-sigma must be > 0")
     if chunk_size <= 0:
@@ -137,8 +162,12 @@ def export_splat4d_from_ckpt(
     if not (0.0 <= base_opacity_threshold <= 1.0):
         raise ValueError("--base-opacity-threshold must be in [0, 1]")
 
-    sigma_factor = math.sqrt(-2.0 * math.log(temporal_threshold))
-    print(f"[splat4d] temporal_threshold={temporal_threshold} -> sigma_factor={sigma_factor:.6f}")
+    if splat4d_version == 1:
+        sigma_factor = math.sqrt(-2.0 * math.log(temporal_threshold))
+        print(f"[splat4d] version=1(hard-window) temporal_threshold={temporal_threshold} -> sigma_factor={sigma_factor:.6f}")
+    else:
+        sigma_factor = 0.0
+        print("[splat4d] version=2(gaussian) time=mu_t, duration=sigma (ignore --temporal-threshold)")
 
     print(f"[splat4d] loading checkpoint: {ckpt_path}")
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
@@ -204,18 +233,31 @@ def export_splat4d_from_ckpt(
             sigma_np = np.exp(_as_numpy_f32(durations_log[start:end]).reshape(-1))  # [n]
             sigma_np = np.clip(sigma_np, float(min_sigma), np.inf).astype(np.float32)
 
-            half_width = (sigma_np * np.float32(sigma_factor)).astype(np.float32)  # [n]
-            t0 = (mu_np - half_width).astype(np.float32)
-            t1 = (mu_np + half_width).astype(np.float32)
-            t0 = np.clip(t0, 0.0, 1.0)
-            t1 = np.clip(t1, 0.0, 1.0)
-            duration = (t1 - t0).astype(np.float32)
-            duration = np.clip(duration, 0.0, 1.0)
+            mu_np = _safe_f32(mu_np, default=0.0)
+            sigma_np = _safe_f32(sigma_np, default=float(min_sigma))
 
-            # 位置: checkpoint 的 means 是 mu_t 时刻的位置,我们要平移到 time0=t0.
-            # mu_x(t) = mu_x + v*(t - mu_t) == pos0 + v*(t - t0)
-            # => pos0 = mu_x + v*(t0 - mu_t)
-            pos0 = means_np + vel_np * (t0.reshape(-1, 1) - mu_np.reshape(-1, 1))
+            if splat4d_version == 1:
+                half_width = (sigma_np * np.float32(sigma_factor)).astype(np.float32)  # [n]
+                t0 = (mu_np - half_width).astype(np.float32)
+                t1 = (mu_np + half_width).astype(np.float32)
+                t0 = np.clip(t0, 0.0, 1.0)
+                t1 = np.clip(t1, 0.0, 1.0)
+                duration = (t1 - t0).astype(np.float32)
+                duration = np.clip(duration, 0.0, 1.0)
+
+                # 位置: checkpoint 的 means 是 mu_t 时刻的位置,我们要平移到 time0=t0.
+                # mu_x(t) = mu_x + v*(t - mu_t) == pos0 + v*(t - t0)
+                # => pos0 = mu_x + v*(t0 - mu_t)
+                pos0 = means_np + vel_np * (t0.reshape(-1, 1) - mu_np.reshape(-1, 1))
+                out_time = t0
+                out_duration = duration
+            else:
+                # v2: 直接把时间高斯核参数写入 time/duration.
+                # - time=mu_t
+                # - duration=sigma
+                pos0 = means_np
+                out_time = mu_np.astype(np.float32, copy=False)
+                out_duration = sigma_np.astype(np.float32, copy=False)
 
             # ---- 其它静态参数 ----
             scales_lin = np.exp(_as_numpy_f32(scales_log[start:end]))  # [n,3]
@@ -250,8 +292,8 @@ def export_splat4d_from_ckpt(
             rec["vx"] = vel_np[:, 0]
             rec["vy"] = vel_np[:, 1]
             rec["vz"] = vel_np[:, 2]
-            rec["time"] = t0
-            rec["duration"] = duration
+            rec["time"] = out_time
+            rec["duration"] = out_duration
             rec["pad0"] = np.float32(0.0)
             rec["pad1"] = np.float32(0.0)
             rec["pad2"] = np.float32(0.0)
@@ -271,10 +313,20 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--output", type=Path, required=True, help="Output .splat4d path")
 
     parser.add_argument(
+        "--splat4d-version",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help=(
+            "导出版本: 1=hard-window(旧语义,通过 temporal-threshold 近似); "
+            "2=gaussian(新语义,time=mu_t,duration=sigma,更贴近 FreeTimeGS)"
+        ),
+    )
+    parser.add_argument(
         "--temporal-threshold",
         type=float,
         default=0.01,
-        help="Temporal opacity threshold in (0,1) used to convert sigma -> hard window (default: 0.01)",
+        help="仅 v1 使用: temporal opacity threshold in (0,1) used to convert sigma -> hard window (default: 0.01)",
     )
     parser.add_argument(
         "--min-sigma",
@@ -300,6 +352,7 @@ def main(argv: list[str]) -> int:
     export_splat4d_from_ckpt(
         ckpt_path=args.ckpt,
         output_path=args.output,
+        splat4d_version=int(args.splat4d_version),
         temporal_threshold=args.temporal_threshold,
         min_sigma=args.min_sigma,
         chunk_size=args.chunk_size,
