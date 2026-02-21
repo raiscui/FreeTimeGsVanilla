@@ -33,6 +33,37 @@ INIT_NPZ="${WORK_DIR}/init_${START_FRAME}_${END_FRAME}.npz"
 mkdir -p "${WORK_DIR}"
 mkdir -p "${RESULT_DIR}"
 
+# ---------------------------------------------------------------------
+# 可选的“稳态开关”(不用改脚本,用环境变量即可覆盖):
+#
+# 训练侧:
+# - DATA_FACTOR:       图片下采样因子(1=原图,2=1/2,4=1/4...). 高分辨率建议 4 或 8.
+# - MAX_SAMPLES:       初始化高斯上限. 输入点太多时可以降到 200000/500000.
+#
+# COLMAP 侧(参考帧标定):
+# - COLMAP_SIFT_NUM_THREADS:       SIFT 提特征线程数. 高分辨率建议 1-2.
+# - COLMAP_SIFT_MAX_IMAGE_SIZE:    SIFT 最大边长. 高分辨率建议 <=2000.
+# - COLMAP_SIFT_MAX_NUM_FEATURES:  SIFT 最大特征数. OOM 时可降到 4096/2048.
+# ---------------------------------------------------------------------
+TRAIN_EXTRA_ARGS=()
+if [[ -n "${DATA_FACTOR:-}" ]]; then
+  TRAIN_EXTRA_ARGS+=(--data-factor "${DATA_FACTOR}")
+fi
+if [[ -n "${MAX_SAMPLES:-}" ]]; then
+  TRAIN_EXTRA_ARGS+=(--max-samples "${MAX_SAMPLES}")
+fi
+
+PREPROCESS_EXTRA_ARGS=()
+if [[ -n "${COLMAP_SIFT_NUM_THREADS:-}" ]]; then
+  PREPROCESS_EXTRA_ARGS+=(--colmap-sift-num-threads "${COLMAP_SIFT_NUM_THREADS}")
+fi
+if [[ -n "${COLMAP_SIFT_MAX_IMAGE_SIZE:-}" ]]; then
+  PREPROCESS_EXTRA_ARGS+=(--colmap-sift-max-image-size "${COLMAP_SIFT_MAX_IMAGE_SIZE}")
+fi
+if [[ -n "${COLMAP_SIFT_MAX_NUM_FEATURES:-}" ]]; then
+  PREPROCESS_EXTRA_ARGS+=(--colmap-sift-max-num-features "${COLMAP_SIFT_MAX_NUM_FEATURES}")
+fi
+
 OVERWRITE_FLAG=()
 if [[ "${OVERWRITE:-0}" == "1" ]]; then
   OVERWRITE_FLAG+=(--overwrite)
@@ -62,7 +93,8 @@ python src/preprocess_mp4_freetimegs.py \
   --start-frame "${START_FRAME}" \
   --end-frame "${END_FRAME}" \
   --reference-frame "${START_FRAME}" \
-  "${OVERWRITE_FLAG[@]}"
+  "${OVERWRITE_FLAG[@]}" \
+  "${PREPROCESS_EXTRA_ARGS[@]}"
 
 echo ""
 echo "[Step 2/3] Combine: all_frames -> init.npz"
@@ -84,11 +116,11 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python src/simple_trainer_freetime_4d_pure_relo
   --end-frame "${END_FRAME}" \
   --max-steps 30000 \
   --eval-steps 30000 \
-  --save-steps 30000
+  --save-steps 30000 \
+  "${TRAIN_EXTRA_ARGS[@]}"
 
 echo ""
 echo "========================================"
 echo "DONE"
 echo "  result_dir: ${RESULT_DIR}"
 echo "========================================"
-

@@ -211,6 +211,13 @@ bash run_mp4_pipeline.sh \
     0 61 0 paper_stratified_small
 ```
 
+高分辨率(例如 4K/8K)更稳的建议:
+- `paper_stratified_small` 默认会用 `data_factor=4` 下采样训练图片,降低显存与耗时.
+- 你也可以用环境变量覆盖,不用改脚本:
+  - `DATA_FACTOR=8`(更小分辨率,更稳)
+  - `MAX_SAMPLES=200000`(初始化点太密时更稳)
+  - `COLMAP_SIFT_NUM_THREADS=1`,`COLMAP_SIFT_MAX_IMAGE_SIZE=1600`,`COLMAP_SIFT_MAX_NUM_FEATURES=4096`(参考帧 COLMAP OOM 时更稳)
+
 ### Step by Step
 
 **Step 1: Combine keyframes**

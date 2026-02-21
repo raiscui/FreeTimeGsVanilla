@@ -3311,8 +3311,11 @@ if __name__ == "__main__":
         "paper_stratified_small": (
             "Paper-Pure stratified sampling over ALL frames (requires init NPZ from --mode all_frames).",
             Config(
+                # ============ Data/Resolution ============
+                data_factor=4,                # 高分辨率更稳: 默认下采样 4x(可用 CLI 覆盖为 1)
+
                 # ============ Paper-Pure Sampling ============
-                max_samples=4_000_000,        # 先用 4M 跑通,显存更安全
+                max_samples=2_000_000,        # 更稳的默认预算(大场景可用 CLI 提高)
                 use_stratified_sampling=True, # KEY: 每帧均匀覆盖,避免 high-velocity 噪点偏置
                 use_keyframe_sampling=False,
                 sample_high_velocity_ratio=0.0,

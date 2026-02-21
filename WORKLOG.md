@@ -63,3 +63,12 @@
 - 为避免高分辨率图片下 COLMAP `feature_extractor` 被 OOM killer SIGKILL:
   - 在 `src/preprocess_mp4_freetimegs.py` 增加并默认启用 `--colmap-sift-num-threads=1`,`--colmap-sift-max-image-size=2000`,`--colmap-match-num-threads=1`.
 - 按用户选择(B),将四文件上下文记录(`task_plan.md`,`notes.md`,`WORKLOG.md`,`LATER_PLANS.md`,`ERRORFIX.md`)与收尾修复(`README.md`,`specs/mp4_to_4dgs_pipeline.md`,`src/preprocess_mp4_freetimegs.py`)一并纳入 git 提交.
+
+## 2026-02-21 07:56:05 UTC
+- 进一步增强“高分辨率更稳”的默认行为:
+  - `src/preprocess_mp4_freetimegs.py` 新增 `--colmap-sift-max-num-features` 与 `--colmap-oom-retries`.
+  - 当 COLMAP `feature_extractor` 因 OOM 被 SIGKILL 时,会自动降级 `max_image_size/max_num_features` 并重试,降低手工排障成本.
+- 训练侧默认更稳:
+  - `paper_stratified_small` 默认 `data_factor=4`,`max_samples=2_000_000`.
+  - `run_mp4_pipeline.sh` 支持用环境变量覆盖 `DATA_FACTOR/MAX_SAMPLES/COLMAP_*`,不用改脚本就能适配更大分辨率数据.
+- 将 git 提交的作者信息统一改为你的 author(`raiscui <vdcoolzi@gmail.com>`),方便后续直接 push 到远端.

@@ -217,3 +217,54 @@
   - stats: `results/bar-release_result_run2/stats/*_step29999.json`
 - [2026-02-21 07:13:07 UTC] 按用户选择(B)执行收尾:
   - 将本次修复(含 COLMAP OOM/SIGKILL 规避参数)与四文件上下文记录一并纳入 git 提交.
+
+
+# 任务计划: 改提交作者信息 + 高分辨率更稳(自动降级/训练下采样)
+
+## 目标
+1. 把我最近两次提交(`d537095`,`55fffaf`)的 author 改成你的名字与邮箱.
+2. 让更高分辨率(例如 4K/8K)数据跑 pipeline 更稳:
+   - COLMAP 被 OOM killer(SIGKILL)时自动降级重试,而不是直接失败.
+   - 训练默认启用更安全的下采样(data_factor),避免显存/时间爆炸.
+
+## 阶段
+- [x] 阶段1: 计划与约束确认
+- [x] 阶段2: 实现稳态改进(COLMAP 自动降级重试 + 训练默认下采样)
+- [x] 阶段3: 本地验证(compileall/import/mermaid-validator)
+- [ ] 阶段4: 改写 git 历史(重写 author)并提交
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,更稳)
+- COLMAP feature_extractor SIGKILL 时,自动重试并逐步降低:
+  - `SiftExtraction.max_image_size`
+  - `SiftExtraction.max_num_features`
+- 同时把 `paper_stratified_small` 的默认 `data_factor` 调到更稳的值(例如 4).
+- 优点: 任何高分辨率数据都更“开箱即用”.
+- 代价: 代码会多一点参数与分支,但逻辑是可控的.
+
+### 方向B: 先能用,后面再优雅(最小改动)
+- 只把 `paper_stratified_small` 默认 `data_factor=4`,并在 README 里提示:
+  - 若 COLMAP SIGKILL,手动调低 `--colmap-sift-max-image-size` 和线程数.
+- 优点: 改动更少.
+- 缺点: 仍需要人肉排障,不够“稳”.
+
+## 做出的决定
+- [2026-02-21 07:16:21 UTC] 选择方向A: 自动降级重试 + 默认训练下采样,优先确保高分辨率数据稳定跑通.
+
+## 关键问题
+1. 你的 git 作者信息是:
+   - user.name = ?
+   - user.email = ?
+2. 你希望 author 改写后保留原提交时间,还是接受“重写提交时间为当前时间”?
+   - 说明: `git commit --amend --reset-author` 通常会把 author date 更新为当前时间.
+
+## 状态
+**目前在阶段4**: 稳态改进已实现且本地验证通过.正在等待你的 `user.name/user.email` 以便提交并重写历史 author.
+
+## 状态更新
+- [2026-02-21 07:44:38 UTC] 已完成稳态改进与本地验证:
+  - `src/preprocess_mp4_freetimegs.py`: COLMAP feature_extractor SIGKILL(OOM) 自动降级重试.
+  - `src/simple_trainer_freetime_4d_pure_relocation.py`: `paper_stratified_small` 默认 `data_factor=4`,`max_samples=2_000_000`.
+  - `run_mp4_pipeline.sh`: 增加可选环境变量覆盖(DATA_FACTOR/MAX_SAMPLES/COLMAP_*).
+  - 验证: `python -m compileall src datasets` + `import torch, gsplat, romatch` + `./tools/mermaid-validator ...` 均通过.

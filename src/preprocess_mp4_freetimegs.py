@@ -399,7 +399,9 @@ def _run_colmap_mapper(
     camera_model: str,
     sift_num_threads: int,
     sift_max_image_size: int,
+    sift_max_num_features: int,
     match_num_threads: int,
+    oom_retries: int,
 ) -> Path:
     """
     在 colmap_ref_dir 下运行:
@@ -424,25 +426,55 @@ def _run_colmap_mapper(
     # - apt 的 colmap 常见是无 CUDA,因此 use_gpu=0.
     # - 对于高分辨率图片,默认的多线程 SIFT 会非常吃内存,容易被 OOM killer 杀掉.
     #   因此这里默认把线程数和 max_image_size 都压低到一个更稳的值,确保能开箱跑通.
-    _run_cmd(
-        [
-            "colmap",
-            "feature_extractor",
-            "--database_path",
-            str(database_path),
-            "--image_path",
-            str(colmap_images_dir_abs),
-            "--ImageReader.camera_model",
-            camera_model,
-            "--SiftExtraction.use_gpu",
-            "0",
-            "--SiftExtraction.num_threads",
-            str(int(sift_num_threads)),
-            "--SiftExtraction.max_image_size",
-            str(int(sift_max_image_size)),
-        ],
-        cwd=colmap_ref_dir.resolve(),
-    )
+    # - 但即便如此,极端高分辨率(或机器内存紧张)仍可能 SIGKILL.
+    #   因此这里对 feature_extractor 做一次“自动降级重试”,避免你反复手调参数.
+    max_image_size = int(sift_max_image_size)
+    max_num_features = int(sift_max_num_features)
+    for attempt_idx in range(int(oom_retries) + 1):
+        try:
+            _run_cmd(
+                [
+                    "colmap",
+                    "feature_extractor",
+                    "--database_path",
+                    str(database_path),
+                    "--image_path",
+                    str(colmap_images_dir_abs),
+                    "--ImageReader.camera_model",
+                    camera_model,
+                    "--SiftExtraction.use_gpu",
+                    "0",
+                    "--SiftExtraction.num_threads",
+                    str(int(sift_num_threads)),
+                    "--SiftExtraction.max_image_size",
+                    str(max_image_size),
+                    "--SiftExtraction.max_num_features",
+                    str(max_num_features),
+                ],
+                cwd=colmap_ref_dir.resolve(),
+            )
+            break
+        except subprocess.CalledProcessError as exc:
+            # 只在“被杀掉”的典型 OOM 场景自动降级.
+            # 其它错误(例如路径错误/参数拼错)直接抛出,避免掩盖真实问题.
+            if attempt_idx >= int(oom_retries) or exc.returncode not in (-9, 137):
+                raise
+
+            prev_image_size = max_image_size
+            prev_num_features = max_num_features
+
+            # 降级策略:
+            # - max_image_size: 乘 0.75,但不低于 640(过小会严重影响位姿).
+            # - max_num_features: 同步降低,避免在低分辨率下仍提取过多特征浪费内存/时间.
+            max_image_size = max(640, int(max_image_size * 0.75))
+            max_num_features = max(1024, int(max_num_features * 0.75))
+
+            print(
+                "[COLMAP] feature_extractor 被 SIGKILL(疑似 OOM). "
+                f"将自动重试 {attempt_idx + 1}/{int(oom_retries)}: "
+                f"max_image_size {prev_image_size}->{max_image_size}, "
+                f"max_num_features {prev_num_features}->{max_num_features}"
+            )
     _run_cmd(
         [
             "colmap",
@@ -699,10 +731,22 @@ def main() -> None:
         help="COLMAP SiftExtraction.max_image_size(高分辨率下建议 <=2000,降低内存占用)",
     )
     parser.add_argument(
+        "--colmap-sift-max-num-features",
+        type=int,
+        default=8192,
+        help="COLMAP SiftExtraction.max_num_features(默认 8192. 若 OOM 会在重试时自动降低)",
+    )
+    parser.add_argument(
         "--colmap-match-num-threads",
         type=int,
         default=1,
         help="COLMAP SiftMatching.num_threads(默认 1,避免 CPU/RAM 压力过大)",
+    )
+    parser.add_argument(
+        "--colmap-oom-retries",
+        type=int,
+        default=2,
+        help="COLMAP feature_extractor 若被 SIGKILL(疑似 OOM),自动降级重试次数(0=不重试)",
     )
 
     args = parser.parse_args()
@@ -775,7 +819,9 @@ def main() -> None:
         camera_model=args.colmap_camera_model,
         sift_num_threads=args.colmap_sift_num_threads,
         sift_max_image_size=args.colmap_sift_max_image_size,
+        sift_max_num_features=args.colmap_sift_max_num_features,
         match_num_threads=args.colmap_match_num_threads,
+        oom_retries=args.colmap_oom_retries,
     )
 
     data_sparse0 = _copy_sparse0_to_data_dir(
