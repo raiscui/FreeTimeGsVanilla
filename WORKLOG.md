@@ -187,3 +187,7 @@ python tools/exportor/export_splat4d.py \
 - 新增 `.direnv/git-askpass.sh` 并设置可执行,让 git 在非交互模式下通过 `GIT_ASKPASS` 读取 `GITHUB_TOKEN` 完成 https 认证.
 - 在 `.git/info/exclude` 追加忽略规则: `.envrc`,`.envrc.private`,`.direnv/`,`.vscode/`,避免误提交并让 `git status` 保持干净.
 - 执行 `direnv allow`,并验证 `direnv export bash` 正常导出相关环境变量.
+
+## 2026-02-21 16:39:25 UTC
+- 完成推送到你的仓库: `git push -u origin main` -> `https://github.com/raiscui/FreeTimeGsVanilla.git`.
+- 验证远端 `origin/main` 与本地 `HEAD` 一致(sha=`2965f15`),并确认本地 `main` 已跟踪 `origin/main`.

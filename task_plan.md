@@ -616,8 +616,8 @@
 - [x] 阶段1: 计划和设置
 - [x] 阶段2: 确认变更范围
 - [x] 阶段3: 提交本地变更
-- [ ] 阶段4: 配置远端并 push
-- [ ] 阶段5: 验证远端状态
+- [x] 阶段4: 配置远端并 push
+- [x] 阶段5: 验证远端状态
 
 ## 方案方向(至少二选一)
 
@@ -650,7 +650,7 @@
   - 结论: 当前环境未配置 GitHub https 凭据,且为避免卡死我禁用了交互式 prompt.需要提供 PAT/凭据后才能继续 push.
 
 ## 状态
-**目前在阶段4**: 已完成远端配置与本地提交,但 push 阻塞在 GitHub https 认证,等待补齐凭据后重试.
+**目前在阶段5**: 已完成 push,并验证 `origin/main` 已更新到本地 `HEAD`.
 
 ## 状态更新
 - [2026-02-21 16:07:26 UTC] 已完成远端配置:
@@ -667,3 +667,7 @@
   - `.git/info/exclude` 已忽略: `.envrc`,`.envrc.private`,`.direnv/`,`.vscode/`
   - 已执行 `direnv allow`,并验证 `direnv export bash` 可导出 `GIT_ASKPASS/GITHUB_TOKEN` 等变量
   - 下一步: 在 `.envrc` 填入 `GITHUB_TOKEN` 后,重试 `git push -u origin main`
+
+- [2026-02-21 16:39:25 UTC] push 已完成并验证:
+  - push: `git push -u origin main` 成功,远端从 `911dcf4` 前进到 `2965f15`
+  - 验证: `git ls-remote origin refs/heads/main` 返回 sha 与本地 `git rev-parse HEAD` 一致
