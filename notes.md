@@ -582,3 +582,16 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
 - header/sections:
   - magic=`SPL4DV02`
   - section table 包含 `XFRM`
+
+
+## 2026-02-22 13:31:47 UTC
+
+### OpenSpec: `.splat4d` delta-v1 真实 updates + Unity 运行时应用
+
+- 已创建 OpenSpec change:
+  - `openspec/changes/splat4d-delta-v1-sh-updates/`
+- 已生成 artifacts(用于后续按任务逐条落地):
+  - `proposal.md`: 明确动机,scope,非目标.
+  - `design.md`: 明确跨仓库实现路径与关键取舍(GPU scatter/per-segment base labels/时间映射等).
+  - `specs/**/spec.md`: 固化 exporter 与 Unity 的规范化要求(可测试场景).
+  - `tasks.md`: 可追踪的实现清单.

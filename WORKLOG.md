@@ -265,3 +265,9 @@ python tools/exportor/export_splat4d.py \
 - 文档同步:
   - `README.md` 增加 Unity/COLMAP 坐标对齐说明与示例命令.
   - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 补齐新参数说明.
+
+## 2026-02-22 13:31:47 UTC
+- 输出 OpenSpec change: `.splat4d delta-v1 真实 updates + Unity 运行时应用`.
+  - change dir: `openspec/changes/splat4d-delta-v1-sh-updates/`
+  - artifacts: `proposal.md`, `design.md`, `specs/**/spec.md`, `tasks.md`
+  - 状态: apply-ready(后续可以直接按 `tasks.md` 进入实现阶段)

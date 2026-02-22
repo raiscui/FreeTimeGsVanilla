@@ -37,3 +37,8 @@
   - FreeTimeGsVanilla exporter 侧需要生成真实 updates.
   - `/workspace/gsplat-unity` 侧需要补齐 delta updates 的应用逻辑.
     - 当前 `Editor/GsplatSplat4DImporter.cs` 对 delta-v1 会做 segment 覆盖性与 header 校验,但解码时只使用 startFrame=0 的 base labels,不会应用后续帧 deltas.
+
+## 2026-02-22 13:31:47 UTC
+- 已将上述 “`.splat4d` delta-v1 真实 updates + Unity 应用” 提升为当前进行中的任务.
+  - OpenSpec change: `openspec/changes/splat4d-delta-v1-sh-updates/`
+  - 后续实现按: `openspec/changes/splat4d-delta-v1-sh-updates/tasks.md`

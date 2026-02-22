@@ -935,8 +935,8 @@
 把当前 `.splat4d format v2` 的 delta-v1 从“占位(updateCount=0)”升级为“真实 updates”,并在 Unity 运行时按 `TimeNormalized` 选帧真正应用这些 deltas,用 GPU compute scatter 更新 `_SHBuffer`.
 
 ## 阶段
-- [ ] 阶段1: 计划和设置(OpenSpec change)
-- [ ] 阶段2: 规格与任务拆解(Artifacts)
+- [x] 阶段1: 计划和设置(OpenSpec change)
+- [x] 阶段2: 规格与任务拆解(Artifacts)
 - [ ] 阶段3: 实现(Exporter+Unity)
 - [ ] 阶段4: 验证与交付(自检+测试+记录)
 
@@ -961,4 +961,10 @@
 - [2026-02-22 13:24:02 UTC] 先输出 OpenSpec change(本次你明确要求),把 scope/非目标/验收标准固定下来,再进入实现阶段,避免实现过程中反复改口径.
 
 ## 状态
-**目前在阶段1**: 正在创建 OpenSpec change scaffold,并将你的完整实现计划固化为 artifacts(便于后续按 tasks 逐条落地).
+**目前在阶段2(已完成,等待进入实现阶段)**:
+- 时间: 2026-02-22 13:24:02 UTC
+- 已完成:
+  - 已创建 OpenSpec change: `openspec/changes/splat4d-delta-v1-sh-updates/`.
+  - 已生成 4 个 artifacts(proposal/design/specs/tasks),满足 apply-ready.
+- 下一步:
+  - 进入阶段3,按 `openspec/changes/splat4d-delta-v1-sh-updates/tasks.md` 逐条实现 exporter 与 gsplat-unity 的改动.
