@@ -937,7 +937,7 @@
 ## 阶段
 - [x] 阶段1: 计划和设置(OpenSpec change)
 - [x] 阶段2: 规格与任务拆解(Artifacts)
-- [ ] 阶段3: 实现(Exporter+Unity)
+- [x] 阶段3: 实现(Exporter+Unity)
 - [ ] 阶段4: 验证与交付(自检+测试+记录)
 
 ## 方案方向(至少二选一)
@@ -961,10 +961,29 @@
 - [2026-02-22 13:24:02 UTC] 先输出 OpenSpec change(本次你明确要求),把 scope/非目标/验收标准固定下来,再进入实现阶段,避免实现过程中反复改口径.
 
 ## 状态
-**目前在阶段2(已完成,等待进入实现阶段)**:
-- 时间: 2026-02-22 13:24:02 UTC
-- 已完成:
-  - 已创建 OpenSpec change: `openspec/changes/splat4d-delta-v1-sh-updates/`.
-  - 已生成 4 个 artifacts(proposal/design/specs/tasks),满足 apply-ready.
-- 下一步:
-  - 进入阶段3,按 `openspec/changes/splat4d-delta-v1-sh-updates/tasks.md` 逐条实现 exporter 与 gsplat-unity 的改动.
+**目前在阶段4(进行中)**:
+- 时间: 2026-02-22 14:47:09 UTC
+- 我现在在做什么(以及为什么):
+  - 已完成 exporter 侧真实 delta-v1 updates 与 Unity 侧 importer/runtime 的落地实现.
+  - 当前在做交付收尾: 更新 tasks 勾选与四文件记录,并补齐“可重复验证”的 smoke 命令.
+- 剩余待办(按 tasks 编号):
+  - 7.3: 在具备 Unity Editor 的环境里跑 EditMode tests.
+  - 7.4: (可选) Unity 手动 smoke: 拖动/播放 `TimeNormalized` 观察 SH rest 变化.
+
+## 状态更新
+- [2026-02-22 14:31:23 UTC] 已完成 exporter 侧“动态 `shN` + per-segment base labels + delta-v1 真实 updates”与 `--self-check-delta` 闭环,并新增合成动态 ckpt 作为可重复验证样例.
+- [2026-02-22 14:31:23 UTC] Unity 侧 importer(v3)已把 `.splat4d v2` 的 per-segment base labels 与 delta bytes 持久化到 `GsplatAsset`,并新增 `GsplatShDelta.compute` 用于运行时 GPU scatter 更新 `_SHBuffer`.
+- [2026-02-22 14:31:23 UTC] 接下来将完成 `Runtime/GsplatRenderer.cs` 的生命周期接线与健壮性:
+  - 在 `OnEnable/asset change` 后初始化 delta runtime,在 `Update` 渲染前按 `TimeNormalized` 应用 deltas.
+  - 修正 updates buffer 的按需扩容,并补齐 band2/band3 segment 对齐校验.
+  - 增加 EditMode 测试与 `CHANGELOG.md`,并跑 compileall/Unity tests 后回写四文件与勾选 tasks.
+- [2026-02-22 14:47:09 UTC] 已完成实现与 Python 侧验证(`compileall` + 合成动态 ckpt 导出 + `--self-check-delta`). 仍待在 Unity 环境执行 7.3/7.4 验证.
+- [2026-02-22 15:58:06 UTC] 为满足“输出真实场景的高质量 `.splat4d format v2`(最新 exporter 行为)”的交付需求,我将从 `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt` 再导出一份:
+  - format: v2(header+sections,`SPL4DV02`)
+  - timeModel: v2(gaussian,`--splat4d-version 2`)
+  - SH: per-band `--sh-bands 3` + `labelsEncoding=delta-v1` + segments(`--frame-count 61`,`--delta-segment-length 50`)
+  - output-space: `colmap`(使用训练时的 `data_dir=sparse/0`,避免 Unity 与 COLMAP 相机参考系不一致)
+- [2026-02-22 16:24:34 UTC] 已完成导出并做轻量二进制校验:
+  - 输出文件: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d`
+  - 校验: magic=`SPL4DV02`,header(timeModel=2,shBands=3,frameCount=61),sections 含 `RECS/META/XFRM` 与各 band 的 `SHCT/SHLB/SHDL`,delta segments 覆盖 `[0,50]` 与 `[50,11]`.
+- [2026-02-22 16:43:40 UTC] 你要求“更新 README 写清楚高质量输出命令”.我将把 `ckpt_29999.pt` 的高质量 `.splat4d v2` 导出命令(含 `output-space=colmap` 与 SH3+delta-v1+segments)同步到 `README.md`,并明确推荐参数与产物路径,避免以后复用时踩坑.

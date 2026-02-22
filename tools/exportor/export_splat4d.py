@@ -59,6 +59,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import struct
 import sys
@@ -185,6 +186,299 @@ def _build_label_delta_v1_static(
     return header + body
 
 
+@dataclass(frozen=True)
+class _DeltaV1BuildResult:
+    """
+    构建 delta-v1 的结果与统计.
+    """
+
+    delta_bytes: bytes
+    total_updates: int
+    max_update_count: int
+
+
+def _build_label_delta_v1_from_labels_by_frame(
+    labels_by_frame: List[np.ndarray],
+    *,
+    segment_start_frame: int,
+    segment_frame_count: int,
+    splat_count: int,
+    label_count: int,
+    magic: bytes,
+) -> _DeltaV1BuildResult:
+    """
+    从逐帧 labels 构建 delta-v1 bytes.
+
+    语义:
+    - base labels 是 segmentStartFrame 的绝对 labels.
+    - body 从 startFrame+1 开始,每帧写“相对上一帧”的更新.
+    """
+    if segment_start_frame < 0:
+        raise ValueError("segment_start_frame must be >= 0")
+    if segment_frame_count <= 0:
+        raise ValueError("segment_frame_count must be > 0")
+    if splat_count <= 0:
+        raise ValueError("splat_count must be > 0")
+    if not (1 <= label_count <= 65535):
+        raise ValueError("label_count must be in [1,65535]")
+    if len(magic) != 8:
+        raise ValueError("delta magic must be 8 bytes")
+
+    end_frame_excl = int(segment_start_frame) + int(segment_frame_count)
+    if len(labels_by_frame) < end_frame_excl:
+        raise ValueError(
+            f"labels_by_frame too short: need >= {end_frame_excl}, got {len(labels_by_frame)}"
+        )
+
+    header = magic + struct.pack(
+        "<5I",
+        1,  # version
+        int(segment_start_frame),
+        int(segment_frame_count),
+        int(splat_count),
+        int(label_count),
+    )
+
+    # 每条 update: (u32 splatId, u16 newLabel, u16 reserved=0)
+    update_dt = np.dtype([("splatId", "<u4"), ("newLabel", "<u2"), ("reserved", "<u2")], align=False)
+
+    parts: List[bytes] = [header]
+    total_updates = 0
+    max_update_count = 0
+
+    for frame in range(int(segment_start_frame) + 1, end_frame_excl):
+        prev = labels_by_frame[int(frame) - 1]
+        curr = labels_by_frame[int(frame)]
+        if prev.shape != (int(splat_count),) or curr.shape != (int(splat_count),):
+            raise ValueError(
+                f"labels shape mismatch at frame={frame}: prev={prev.shape} curr={curr.shape} expected=({int(splat_count)},)"
+            )
+
+        changed = np.nonzero(prev != curr)[0].astype(np.uint32, copy=False)
+        update_count = int(changed.size)
+        parts.append(struct.pack("<I", int(update_count)))
+
+        if update_count == 0:
+            continue
+
+        # np.nonzero 返回的索引天然是递增的,这里再 assert 一次,避免未来改动引入乱序.
+        if update_count >= 2 and not np.all(changed[1:] > changed[:-1]):
+            raise ValueError(f"delta-v1 requires strictly increasing splatId within a frame block, frame={frame}")
+
+        new_labels = curr[changed].astype(np.uint16, copy=False)
+        max_label = int(new_labels.max(initial=0))
+        if max_label >= int(label_count):
+            raise ValueError(f"label out of range at frame={frame}: max={max_label} label_count={int(label_count)}")
+
+        updates = np.empty((update_count,), dtype=update_dt)
+        updates["splatId"] = changed
+        updates["newLabel"] = new_labels
+        updates["reserved"] = np.uint16(0)
+        parts.append(updates.tobytes(order="C"))
+
+        total_updates += int(update_count)
+        max_update_count = max(int(max_update_count), int(update_count))
+
+    delta_bytes = b"".join(parts)
+    return _DeltaV1BuildResult(
+        delta_bytes=delta_bytes,
+        total_updates=int(total_updates),
+        max_update_count=int(max_update_count),
+    )
+
+
+def _decode_label_delta_v1(
+    delta_bytes: bytes,
+    *,
+    expected_magic: bytes,
+    base_labels_u16: np.ndarray,
+) -> Tuple[int, int, int, int, List[np.ndarray]]:
+    """
+    解码 delta-v1,返回该 segment 的逐帧 labels.
+
+    返回:
+    - (segmentStartFrame, segmentFrameCount, splatCount, labelCount, labelsBySegmentFrame)
+      - labelsBySegmentFrame 长度为 segmentFrameCount,第 0 帧是 base labels.
+    """
+    if len(expected_magic) != 8:
+        raise ValueError("expected_magic must be 8 bytes")
+    if base_labels_u16.ndim != 1:
+        raise ValueError("base_labels_u16 must be 1D")
+
+    header_size = 8 + 5 * 4
+    if len(delta_bytes) < header_size:
+        raise ValueError(f"delta_bytes too short: {len(delta_bytes)} < {header_size}")
+
+    magic = delta_bytes[:8]
+    if magic != expected_magic:
+        raise ValueError(f"delta magic mismatch: got={magic!r} expected={expected_magic!r}")
+
+    version, seg_start, seg_count, splat_count, label_count = struct.unpack("<5I", delta_bytes[8:header_size])
+    if int(version) != 1:
+        raise ValueError(f"delta version must be 1, got {version}")
+    if int(seg_count) <= 0:
+        raise ValueError(f"segmentFrameCount must be > 0, got {seg_count}")
+    if int(splat_count) <= 0:
+        raise ValueError(f"splatCount must be > 0, got {splat_count}")
+    if int(base_labels_u16.shape[0]) != int(splat_count):
+        raise ValueError(f"base labels length mismatch: {int(base_labels_u16.shape[0])} vs splatCount={int(splat_count)}")
+
+    update_dt = np.dtype([("splatId", "<u4"), ("newLabel", "<u2"), ("reserved", "<u2")], align=False)
+
+    offset = int(header_size)
+    labels = base_labels_u16.astype(np.uint16, copy=True)
+    out: List[np.ndarray] = [labels.copy()]
+
+    for _rel in range(1, int(seg_count)):
+        if offset + 4 > len(delta_bytes):
+            raise ValueError("delta_bytes truncated while reading updateCount")
+        (update_count,) = struct.unpack("<I", delta_bytes[offset : offset + 4])
+        offset += 4
+
+        update_count = int(update_count)
+        if update_count < 0:
+            raise ValueError("updateCount must be >= 0")
+        if update_count == 0:
+            out.append(labels.copy())
+            continue
+
+        need = int(update_count) * int(update_dt.itemsize)
+        if offset + need > len(delta_bytes):
+            raise ValueError("delta_bytes truncated while reading updates payload")
+
+        updates = np.frombuffer(delta_bytes, dtype=update_dt, count=int(update_count), offset=int(offset))
+        offset += int(need)
+
+        if np.any(updates["reserved"] != 0):
+            raise ValueError("delta update reserved field must be 0")
+
+        splat_ids = updates["splatId"]
+        if int(splat_ids.size) >= 2 and not np.all(splat_ids[1:] > splat_ids[:-1]):
+            raise ValueError("delta-v1 requires strictly increasing splatId within a frame block")
+        if int(splat_ids.max(initial=0)) >= int(splat_count):
+            raise ValueError("delta splatId out of range")
+
+        new_labels = updates["newLabel"]
+        if int(new_labels.max(initial=0)) >= int(label_count):
+            raise ValueError("delta newLabel out of range")
+
+        labels[splat_ids] = new_labels
+        out.append(labels.copy())
+
+    if offset != len(delta_bytes):
+        raise ValueError(f"delta_bytes has trailing bytes: parsed={offset} total={len(delta_bytes)}")
+
+    return int(seg_start), int(seg_count), int(splat_count), int(label_count), out
+
+
+@dataclass(frozen=True)
+class _ShnLayout:
+    """
+    描述 checkpoint 里 `splats["shN"]` 的布局.
+
+    支持:
+    - 静态: [N,K,3]
+    - 动态: [F,N,K,3] 或 [N,F,K,3]
+    """
+
+    is_dynamic: bool
+    # 仅当 is_dynamic=True 时有效.
+    frame_axis: Optional[int]
+    frame_count: int
+    splat_count: int
+    coeff_count: int
+
+
+def _infer_shn_layout(
+    shn: torch.Tensor,
+    *,
+    frame_count: int,
+    shn_frame_axis: Optional[int],
+) -> _ShnLayout:
+    """
+    推断 `shN` 的帧轴,并在歧义/不匹配时 fail-fast.
+
+    约定:
+    - `--shn-frame-axis 0` 表示 shape=[F,N,K,3]
+    - `--shn-frame-axis 1` 表示 shape=[N,F,K,3]
+    """
+    if shn.ndim == 3:
+        if int(shn.shape[2]) != 3:
+            raise ValueError(f"shN must have last dim=3, got shape={tuple(shn.shape)}")
+        return _ShnLayout(
+            is_dynamic=False,
+            frame_axis=None,
+            frame_count=1,
+            splat_count=int(shn.shape[0]),
+            coeff_count=int(shn.shape[1]),
+        )
+
+    if shn.ndim != 4:
+        raise ValueError(f"shN must be [N,K,3] or [F,N,K,3]/[N,F,K,3], got shape={tuple(shn.shape)}")
+    if frame_count <= 0:
+        raise ValueError("dynamic shN requires --frame-count > 0")
+    if int(shn.shape[3]) != 3:
+        raise ValueError(f"shN must have last dim=3, got shape={tuple(shn.shape)}")
+
+    dim0 = int(shn.shape[0])
+    dim1 = int(shn.shape[1])
+
+    match0 = dim0 == int(frame_count)
+    match1 = dim1 == int(frame_count)
+
+    if shn_frame_axis is not None:
+        axis = int(shn_frame_axis)
+        if axis not in (0, 1):
+            raise ValueError("--shn-frame-axis must be 0 or 1")
+        if axis == 0 and not match0:
+            raise ValueError(f"--shn-frame-axis=0 requires shN.shape[0]==frame_count, got {dim0} vs {int(frame_count)}")
+        if axis == 1 and not match1:
+            raise ValueError(f"--shn-frame-axis=1 requires shN.shape[1]==frame_count, got {dim1} vs {int(frame_count)}")
+    else:
+        if match0 and not match1:
+            axis = 0
+        elif match1 and not match0:
+            axis = 1
+        elif match0 and match1:
+            raise ValueError(
+                "ambiguous dynamic shN: both shN.shape[0] and shN.shape[1] match --frame-count. "
+                "Please pass --shn-frame-axis 0|1."
+            )
+        else:
+            raise ValueError(
+                f"dynamic shN frame axis mismatch: shN.shape[:2]=({dim0},{dim1}) does not match --frame-count={int(frame_count)}"
+            )
+
+    splat_count = dim1 if int(axis) == 0 else dim0
+    coeff_count = int(shn.shape[2])
+    return _ShnLayout(
+        is_dynamic=True,
+        frame_axis=int(axis),
+        frame_count=int(frame_count),
+        splat_count=int(splat_count),
+        coeff_count=int(coeff_count),
+    )
+
+
+def _shn_get_frame_view(shn: torch.Tensor, *, layout: _ShnLayout, frame_index: int) -> torch.Tensor:
+    """
+    统一返回某一帧的 `shN` 视图: [N,K,3].
+
+    - 静态 shN: 忽略 frame_index,直接返回原 tensor.
+    - 动态 shN: 根据 layout.frame_axis 取出对应帧.
+    """
+    if not layout.is_dynamic:
+        return shn
+
+    if not (0 <= int(frame_index) < int(layout.frame_count)):
+        raise ValueError(f"frame_index out of range: {frame_index} (frame_count={layout.frame_count})")
+    if layout.frame_axis == 0:
+        return shn[int(frame_index)]
+    if layout.frame_axis == 1:
+        return shn[:, int(frame_index)]
+    raise RuntimeError("internal error: invalid layout.frame_axis")
+
+
 def _flatten_sh_rest_v2_per_band(shn: np.ndarray, *, bands: int) -> Dict[str, Tuple[np.ndarray, int]]:
     """
     把 checkpoint 的 `shN[N,K,3]` 按 band 拆分成多个低维向量,用于 per-band kmeans.
@@ -233,6 +527,36 @@ def _flatten_sh_rest_v2_per_band(shn: np.ndarray, *, bands: int) -> Dict[str, Tu
         offset += coeff_count
 
     if offset != rest_coeff_total:
+        raise RuntimeError("internal error: per-band SH rest coeff offset mismatch")
+
+    return out
+
+
+def _iter_sh_rest_band_defs(*, bands: int) -> List[Tuple[int, str, int, int]]:
+    """
+    返回每个 band 的定义,用于统一处理静态/动态 shN.
+
+    返回: List[(bandIndex(1..3), bandName, coeffOffset, coeffCount)].
+    - coeffOffset/Count 的单位是“rest coeff index”(不是 float3 的元素偏移).
+    """
+    if not (1 <= int(bands) <= 3):
+        raise ValueError(f"bands must be in [1,3], got {bands}")
+
+    out: List[Tuple[int, str, int, int]] = []
+    offset = 0
+
+    # band 1: 3 coeff
+    out.append((1, "sh1", int(offset), 3))
+    offset += 3
+    if int(bands) >= 2:
+        out.append((2, "sh2", int(offset), 5))
+        offset += 5
+    if int(bands) >= 3:
+        out.append((3, "sh3", int(offset), 7))
+        offset += 7
+
+    rest_coeff_total = int((int(bands) + 1) ** 2 - 1)
+    if int(offset) != int(rest_coeff_total):
         raise RuntimeError("internal error: per-band SH rest coeff offset mismatch")
 
     return out
@@ -340,6 +664,214 @@ def _build_sh_codebook_and_labels(
         labels[start:end] = idx.astype(np.uint16)
 
     return _ShCodebookResult(centroids_f32=centroids_f32, labels_u16=labels)
+
+
+def _fit_sh_codebook_from_sample(
+    sample_f32: np.ndarray,
+    *,
+    name: str,
+    codebook_size: int,
+    seed: int,
+    kmeans_iters: int,
+) -> np.ndarray:
+    """
+    仅拟合 codebook(centroids),不做 labels 分配.
+
+    用途:
+    - 动态 `shN` 需要跨帧抽样拟合 codebook.
+    - labels 分配会按“逐帧 + chunk”的方式进行,避免一次性 flatten 到内存里.
+    """
+    if not (1 <= int(codebook_size) <= 65535):
+        raise ValueError(f"--shn-count must be in [1,65535], got {codebook_size}")
+    if int(kmeans_iters) <= 0:
+        raise ValueError(f"--shn-kmeans-iters must be > 0, got {kmeans_iters}")
+
+    # 延迟 import,避免在不导出 SH 时引入 SciPy 依赖.
+    import warnings
+
+    from scipy.cluster.vq import kmeans2
+
+    sample = sample_f32.astype(np.float32, copy=False)
+    n = int(sample.shape[0])
+    d = int(sample.shape[1])
+    if sample.shape != (n, d):
+        raise ValueError("internal error: sample shape mismatch")
+    if d % 3 != 0:
+        raise ValueError(f"internal error: sample dim must be multiple of 3, got {d}")
+    if n <= 0:
+        raise ValueError("sample must be non-empty")
+
+    print(f"[splat4d] {name} kmeans(dynamic): sample={n:,}, K={int(codebook_size)}, D={d}")
+    centroids: Optional[np.ndarray] = None
+    for attempt in range(3):
+        attempt_seed = int(seed) + int(attempt)
+
+        rng_state = np.random.get_state()
+        try:
+            np.random.seed(int(attempt_seed))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                c_try, labels_try = kmeans2(
+                    sample,
+                    int(codebook_size),
+                    iter=int(kmeans_iters),
+                    minit="++",
+                )
+        finally:
+            np.random.set_state(rng_state)
+
+        warned_empty = any("clusters is empty" in str(w.message) for w in caught)
+        used = int(np.unique(labels_try).size)
+        centroids = c_try
+
+        if (not warned_empty) and used == int(codebook_size):
+            break
+        if attempt == 0:
+            print(f"[splat4d] {name} kmeans(dynamic): empty cluster detected, retrying...")
+        print(f"[splat4d] {name} kmeans(dynamic) retry {attempt+1}/3: used={used}/{int(codebook_size)} seed={attempt_seed}")
+
+    if centroids is None:
+        raise RuntimeError("internal error: kmeans2 returned no centroids")
+
+    return centroids.astype(np.float32, copy=False)
+
+
+def _torch_sh_band_flat_f32(sh_coeff: torch.Tensor) -> np.ndarray:
+    """
+    把 torch 的 `[n,coeffCount,3]` 转成 numpy 的 `[n,coeffCount*3]` float32.
+    """
+    x = sh_coeff.detach().cpu()
+    if x.dtype != torch.float32:
+        x = x.to(dtype=torch.float32)
+    n = int(x.shape[0])
+    coeff_count = int(x.shape[1])
+    if x.ndim != 3 or int(x.shape[2]) != 3:
+        raise ValueError(f"internal error: sh_coeff must be [n,coeffCount,3], got shape={tuple(x.shape)}")
+    return x.reshape(n, coeff_count * 3).numpy()
+
+
+def _sample_shn_dynamic_band_flat(
+    *,
+    shn: torch.Tensor,
+    layout: _ShnLayout,
+    keep_indices: Optional[torch.Tensor],
+    frame_count: int,
+    sample_size: int,
+    seed: int,
+    coeff_offset: int,
+    coeff_count: int,
+) -> np.ndarray:
+    """
+    从动态 shN 中跨帧抽样,生成 kmeans 的 sample matrix.
+
+    采样单位是二元组 `(frameIndex, splatId)`.
+    - splatId 是“导出后的索引”(已应用 keep mask).
+    - 当 keep_indices 不为空时,会映射回原始 ckpt 的 splat 索引再 gather.
+    """
+    if not layout.is_dynamic:
+        raise ValueError("internal error: sample_shn_dynamic called for static shN")
+    if sample_size <= 0:
+        raise ValueError(f"--shn-codebook-sample must be > 0, got {sample_size}")
+    if not (0 <= int(coeff_offset) and int(coeff_count) > 0):
+        raise ValueError("internal error: invalid coeff_offset/coeff_count")
+
+    n_out = int(layout.splat_count) if keep_indices is None else int(keep_indices.numel())
+    if n_out <= 0:
+        raise ValueError("splatCount must be > 0")
+
+    total_points = int(frame_count) * int(n_out)
+    sample_n = min(int(sample_size), int(total_points))
+    if sample_n <= 0:
+        raise ValueError("sample_n must be > 0")
+
+    # 注意: 这里使用“带放回”采样,避免 totalPoints=F*N 超大时的无放回采样成本.
+    rng = np.random.default_rng(int(seed))
+    frames = rng.integers(0, int(frame_count), size=sample_n, dtype=np.int64)
+    splats_out = rng.integers(0, int(n_out), size=sample_n, dtype=np.int64)
+
+    order = np.argsort(frames)
+    frames_sorted = frames[order]
+    splats_sorted = splats_out[order]
+
+    out = np.empty((sample_n, int(coeff_count) * 3), dtype=np.float32)
+
+    # 逐帧 gather,避免单点索引的 Python 开销.
+    start = 0
+    while start < sample_n:
+        f = int(frames_sorted[start])
+        end = start + 1
+        while end < sample_n and int(frames_sorted[end]) == f:
+            end += 1
+
+        idx_out_np = splats_sorted[start:end]
+        idx_out = torch.as_tensor(idx_out_np, dtype=torch.int64)
+        if keep_indices is None:
+            idx_orig = idx_out
+        else:
+            idx_orig = keep_indices.index_select(0, idx_out)
+
+        shn_frame = _shn_get_frame_view(shn, layout=layout, frame_index=int(f))  # [N,K,3]
+        gathered = shn_frame.index_select(0, idx_orig)  # [m,K,3]
+        band = gathered[:, int(coeff_offset) : int(coeff_offset + coeff_count), :]  # [m,coeff,3]
+        flat = _torch_sh_band_flat_f32(band)  # [m,D]
+
+        out[order[start:end]] = flat
+        start = end
+
+    return out
+
+
+def _assign_sh_labels_dynamic_by_frame(
+    *,
+    shn: torch.Tensor,
+    layout: _ShnLayout,
+    keep_indices: Optional[torch.Tensor],
+    frame_count: int,
+    coeff_offset: int,
+    coeff_count: int,
+    centroids_f32: np.ndarray,
+    assign_chunk: int,
+) -> List[np.ndarray]:
+    """
+    对动态 shN 逐帧分配 labels.
+
+    返回: labelsByFrame,长度=frame_count,每帧是 `[N] u16`(N 为导出后的 splatCount).
+    """
+    if not layout.is_dynamic:
+        raise ValueError("internal error: assign_sh_labels_dynamic_by_frame called for static shN")
+    if frame_count <= 0:
+        raise ValueError("frame_count must be > 0")
+    if assign_chunk <= 0:
+        raise ValueError(f"--shn-assign-chunk must be > 0, got {assign_chunk}")
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(centroids_f32.astype(np.float32, copy=False))
+
+    n_out = int(layout.splat_count) if keep_indices is None else int(keep_indices.numel())
+    labels_by_frame: List[np.ndarray] = []
+
+    for t in range(int(frame_count)):
+        shn_frame = _shn_get_frame_view(shn, layout=layout, frame_index=int(t))  # [N,K,3]
+        labels = np.empty((n_out,), dtype=np.uint16)
+
+        for start in range(0, n_out, int(assign_chunk)):
+            end = min(start + int(assign_chunk), n_out)
+
+            if keep_indices is None:
+                chunk = shn_frame[start:end]
+            else:
+                idx = keep_indices[start:end]
+                chunk = shn_frame.index_select(0, idx)
+
+            band = chunk[:, int(coeff_offset) : int(coeff_offset + coeff_count), :]  # [n,coeff,3]
+            x = _torch_sh_band_flat_f32(band)
+            _, idx_nn = tree.query(x, k=1, workers=-1)
+            labels[start:end] = idx_nn.astype(np.uint16)
+
+        labels_by_frame.append(labels)
+
+    return labels_by_frame
 
 
 def _safe_f32(x: np.ndarray, *, default: float) -> np.ndarray:
@@ -663,6 +1195,8 @@ def export_splat4d_from_ckpt(
     shn_labels_encoding: Literal["full", "delta-v1"],
     frame_count: int,
     delta_segment_length: int,
+    shn_frame_axis: Optional[int],
+    self_check_delta: bool,
     shn_codebook_sample: int,
     shn_assign_chunk: int,
     shn_kmeans_iters: int,
@@ -725,6 +1259,10 @@ def export_splat4d_from_ckpt(
             raise ValueError("--shn-count must be in [1,65535]")
         if shn_labels_encoding == "delta-v1" and frame_count <= 0:
             raise ValueError("--frame-count must be > 0 when --shn-labels-encoding=delta-v1")
+        if shn_frame_axis is not None and int(shn_frame_axis) not in (0, 1):
+            raise ValueError("--shn-frame-axis must be 0 or 1")
+    if bool(self_check_delta) and not (sh_bands > 0 and shn_labels_encoding == "delta-v1"):
+        raise ValueError("--self-check-delta requires --sh-bands>0 and --shn-labels-encoding=delta-v1")
 
     if splat4d_version == 1:
         sigma_factor = math.sqrt(-2.0 * math.log(temporal_threshold))
@@ -754,14 +1292,25 @@ def export_splat4d_from_ckpt(
     velocities = splats["velocities"]  # [N,3] meters/normalized_time
     shn: Optional[torch.Tensor] = splats.get("shN") if sh_bands > 0 else None
 
+    shn_layout: Optional[_ShnLayout] = None
+    # 动态 shN 仅在 labelsEncoding=delta-v1 时有意义,因为 format v2 当前不支持“逐帧全量 labels blob”.
+    if sh_bands > 0:
+        if shn is None:
+            raise RuntimeError("internal error: shn is None but sh_bands > 0")
+        if shn.ndim == 4 and shn_labels_encoding != "delta-v1":
+            raise ValueError("dynamic shN requires --shn-labels-encoding=delta-v1")
+        shn_layout = _infer_shn_layout(shn, frame_count=int(frame_count), shn_frame_axis=shn_frame_axis)
+
     n_total = int(means.shape[0])
     print(f"[splat4d] gaussians: {n_total:,}")
 
     # base opacity filter(可选): 先在 CPU 上做一次筛选,降低输出体积.
     # 注意: 这只是 base opacity,不会考虑 temporal opacity.
+    shn_keep_indices: Optional[torch.Tensor] = None
     if base_opacity_threshold > 0.0:
         base_opacity = torch.sigmoid(opacities_logit.detach().cpu())
         keep = base_opacity >= float(base_opacity_threshold)
+        keep_idx = keep.nonzero(as_tuple=False).reshape(-1).to(dtype=torch.int64)
         keep_count = int(keep.sum().item())
         print(f"[splat4d] base opacity filter: >= {base_opacity_threshold} -> keep {keep_count:,}/{n_total:,}")
         means = means[keep]
@@ -773,7 +1322,14 @@ def export_splat4d_from_ckpt(
         durations_log = durations_log[keep]
         velocities = velocities[keep]
         if shn is not None:
-            shn = shn[keep]
+            if shn_layout is None:
+                raise RuntimeError("internal error: shn_layout is None")
+            # 静态 shN 直接裁剪即可.
+            # 动态 shN 若直接裁剪会复制一个巨大的 4D tensor,这里改为保存 indices,后续按 chunk gather.
+            if not shn_layout.is_dynamic:
+                shn = shn[keep]
+            else:
+                shn_keep_indices = keep_idx
         n_total = keep_count
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -899,49 +1455,109 @@ def export_splat4d_from_ckpt(
     # -----------------------------
     print(f"[splat4d] format=v2(header+sections) output: {output_path}")
 
-    # 1) 预计算 SH per-band codebook + labels(静态)
+    # 1) 预计算 SH per-band codebook + labels
+    # - 静态 shN: 生成 1 份 labels(u16[N])
+    # - 动态 shN: 生成 labelsByFrame(F 份 u16[N]),用于后续 delta-v1
     sh_band_centroids_bytes: Dict[int, bytes] = {}
-    sh_band_labels_u16: Dict[int, np.ndarray] = {}
     sh_band_codebook_count: Dict[int, int] = {}
+    sh_band_labels_u16: Dict[int, np.ndarray] = {}
+    sh_band_labels_by_frame: Dict[int, List[np.ndarray]] = {}
 
     if sh_bands > 0:
-        if shn is None:
-            raise RuntimeError("internal error: shn is None but sh_bands > 0")
-        shn_np = _as_numpy_f32(shn)  # [N,K,3]
-        per_band = _flatten_sh_rest_v2_per_band(shn_np, bands=int(sh_bands))
+        if shn is None or shn_layout is None:
+            raise RuntimeError("internal error: shn/shn_layout is None but sh_bands > 0")
 
-        for band_idx, (band_name, (band_flat, _coeff_count)) in enumerate(per_band.items()):
-            # band: 1,2,3
-            band = 1 + int(band_idx)
-            band_seed = int(seed) + int(band_idx)
-            res = _build_sh_codebook_and_labels(
-                band_flat,
-                name=str(band_name),
-                codebook_size=int(shn_count),
-                sample_size=int(shn_codebook_sample),
-                seed=int(band_seed),
-                assign_chunk=int(shn_assign_chunk),
-                kmeans_iters=int(shn_kmeans_iters),
-            )
+        # 只需要 rest 的前 ((bands+1)^2-1) 个 coeff.
+        rest_coeff_total = int((int(sh_bands) + 1) ** 2 - 1)
+        coeff_total = int(shn_layout.coeff_count if shn_layout.is_dynamic else shn.shape[1])
+        if coeff_total < rest_coeff_total:
+            raise ValueError(f"shN coeff count too small: need >= {rest_coeff_total}, got {coeff_total}")
 
-            codebook_count = int(res.centroids_f32.shape[0])
-            sh_band_codebook_count[int(band)] = int(codebook_count)
-            sh_band_labels_u16[int(band)] = res.labels_u16.astype(np.uint16, copy=False)
+        if not shn_layout.is_dynamic:
+            shn_np = _as_numpy_f32(shn)  # [N,K,3]
+            per_band = _flatten_sh_rest_v2_per_band(shn_np, bands=int(sh_bands))
 
-            if shn_centroids_type == "f16":
-                sh_band_centroids_bytes[int(band)] = res.centroids_f32.astype("<f2", copy=False).tobytes(order="C")
-            elif shn_centroids_type == "f32":
-                sh_band_centroids_bytes[int(band)] = res.centroids_f32.astype("<f4", copy=False).tobytes(order="C")
-            else:  # pragma: no cover
-                raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
-
-        # 小 sanity: labels 必须在 [0,codebookCount) 内(理论上 KDTree 分配不会越界).
-        for band, labels_u16 in sh_band_labels_u16.items():
-            max_label = int(labels_u16.max(initial=0))
-            if max_label >= int(sh_band_codebook_count[band]):
-                raise RuntimeError(
-                    f"internal error: band={band} labels has out-of-range value {max_label} >= {sh_band_codebook_count[band]}"
+            for band_idx, (band_name, (band_flat, _coeff_count)) in enumerate(per_band.items()):
+                band = 1 + int(band_idx)
+                band_seed = int(seed) + int(band_idx)
+                res = _build_sh_codebook_and_labels(
+                    band_flat,
+                    name=str(band_name),
+                    codebook_size=int(shn_count),
+                    sample_size=int(shn_codebook_sample),
+                    seed=int(band_seed),
+                    assign_chunk=int(shn_assign_chunk),
+                    kmeans_iters=int(shn_kmeans_iters),
                 )
+
+                codebook_count = int(res.centroids_f32.shape[0])
+                sh_band_codebook_count[int(band)] = int(codebook_count)
+                sh_band_labels_u16[int(band)] = res.labels_u16.astype(np.uint16, copy=False)
+
+                if shn_centroids_type == "f16":
+                    sh_band_centroids_bytes[int(band)] = res.centroids_f32.astype("<f2", copy=False).tobytes(order="C")
+                elif shn_centroids_type == "f32":
+                    sh_band_centroids_bytes[int(band)] = res.centroids_f32.astype("<f4", copy=False).tobytes(order="C")
+                else:  # pragma: no cover
+                    raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
+
+            for band, labels_u16 in sh_band_labels_u16.items():
+                max_label = int(labels_u16.max(initial=0))
+                if max_label >= int(sh_band_codebook_count[band]):
+                    raise RuntimeError(
+                        f"internal error: band={band} labels has out-of-range value {max_label} >= {sh_band_codebook_count[band]}"
+                    )
+        else:
+            # 动态 shN: codebook 仍是“全局 persistent”,但 labels 要逐帧分配.
+            band_defs = _iter_sh_rest_band_defs(bands=int(sh_bands))
+            for band, band_name, coeff_offset, coeff_count in band_defs:
+                band_seed = int(seed) + int(band - 1)
+
+                sample = _sample_shn_dynamic_band_flat(
+                    shn=shn,
+                    layout=shn_layout,
+                    keep_indices=shn_keep_indices,
+                    frame_count=int(frame_count),
+                    sample_size=int(shn_codebook_sample),
+                    seed=int(band_seed),
+                    coeff_offset=int(coeff_offset),
+                    coeff_count=int(coeff_count),
+                )
+                centroids_f32 = _fit_sh_codebook_from_sample(
+                    sample,
+                    name=str(band_name),
+                    codebook_size=int(shn_count),
+                    seed=int(band_seed),
+                    kmeans_iters=int(shn_kmeans_iters),
+                )
+
+                sh_band_codebook_count[int(band)] = int(centroids_f32.shape[0])
+
+                labels_by_frame = _assign_sh_labels_dynamic_by_frame(
+                    shn=shn,
+                    layout=shn_layout,
+                    keep_indices=shn_keep_indices,
+                    frame_count=int(frame_count),
+                    coeff_offset=int(coeff_offset),
+                    coeff_count=int(coeff_count),
+                    centroids_f32=centroids_f32,
+                    assign_chunk=int(shn_assign_chunk),
+                )
+                sh_band_labels_by_frame[int(band)] = labels_by_frame
+
+                # labels 范围 sanity.
+                max_label = max(int(x.max(initial=0)) for x in labels_by_frame)
+                if max_label >= int(sh_band_codebook_count[int(band)]):
+                    raise RuntimeError(
+                        f"internal error: band={band} labels has out-of-range value {max_label} >= {sh_band_codebook_count[int(band)]}"
+                    )
+
+                if shn_centroids_type == "f16":
+                    sh_band_centroids_bytes[int(band)] = centroids_f32.astype("<f2", copy=False).tobytes(order="C")
+                elif shn_centroids_type == "f32":
+                    sh_band_centroids_bytes[int(band)] = centroids_f32.astype("<f4", copy=False).tobytes(order="C")
+                else:  # pragma: no cover
+                    raise ValueError(f"unknown shn_centroids_type: {shn_centroids_type}")
 
     # 2) delta segments(仅用于写 section entry + delta bytes)
     delta_segments: Optional[List[Tuple[int, int]]] = None
@@ -1098,67 +1714,209 @@ def export_splat4d_from_ckpt(
                 f.write(centroids_bytes)
                 sections.append((_SECT_SHCT, int(band), 0, 0, int(centroids_offset), int(len(centroids_bytes))))
 
-            # base labels: 为避免静态 labels 在每个 segment 重复占用空间,我们每个 band 只写 1 份.
-            labels_offset_by_band: Dict[int, int] = {}
-            labels_length_by_band: Dict[int, int] = {}
-            for band in range(1, int(sh_bands) + 1):
-                labels_offset = int(f.tell())
-                labels_u16 = sh_band_labels_u16[int(band)].astype("<u2", copy=False)
-                labels_bytes = labels_u16.tobytes(order="C")
-                f.write(labels_bytes)
-                labels_offset_by_band[int(band)] = int(labels_offset)
-                labels_length_by_band[int(band)] = int(len(labels_bytes))
+            shn_is_dynamic = bool(shn_layout is not None and shn_layout.is_dynamic)
 
             if shn_labels_encoding == "full":
-                # 1 个 labels blob 足够.
+                if shn_is_dynamic:
+                    raise RuntimeError("internal error: dynamic shN should not reach labelsEncoding=full path")
+
+                # full: 仅写 1 份 labels blob.
                 for band in range(1, int(sh_bands) + 1):
+                    labels_offset = int(f.tell())
+                    labels_u16 = sh_band_labels_u16[int(band)].astype("<u2", copy=False)
+                    labels_bytes = labels_u16.tobytes(order="C")
+                    f.write(labels_bytes)
+
                     sections.append(
                         (
                             _SECT_SHLB,
                             int(band),
                             0,
                             0,
-                            int(labels_offset_by_band[int(band)]),
-                            int(labels_length_by_band[int(band)]),
+                            int(labels_offset),
+                            int(len(labels_bytes)),
                         )
                     )
             else:
                 if delta_segments is None:
                     raise RuntimeError("internal error: delta_segments is None but delta-v1 requested")
-                for band in range(1, int(sh_bands) + 1):
-                    label_count = int(sh_band_codebook_count[int(band)])
-                    for seg_start, seg_count in delta_segments:
-                        # base labels entry(指向同一份 labels blob)
-                        sections.append(
-                            (
-                                _SECT_SHLB,
-                                int(band),
-                                int(seg_start),
-                                int(seg_count),
-                                int(labels_offset_by_band[int(band)]),
-                                int(labels_length_by_band[int(band)]),
-                            )
-                        )
 
-                        # delta bytes(每个 segment 单独写,header 中包含 segmentStartFrame/FrameCount)
-                        delta_offset = int(f.tell())
-                        delta_bytes = _build_label_delta_v1_static(
-                            segment_start_frame=int(seg_start),
-                            segment_frame_count=int(seg_count),
-                            splat_count=int(n_total),
-                            label_count=int(label_count),
-                            magic=b"SPL4DLB1",
-                        )
-                        f.write(delta_bytes)
-                        sections.append(
-                            (
-                                _SECT_SHDL,
-                                int(band),
-                                int(seg_start),
-                                int(seg_count),
-                                int(delta_offset),
-                                int(len(delta_bytes)),
+                if not shn_is_dynamic:
+                    # 静态 labels: 为避免重复占用空间,每个 band 只写 1 份 labels blob,
+                    # 但仍然会为每个 segment 生成独立 SHLB entry(指向同一 offset).
+                    labels_offset_by_band: Dict[int, int] = {}
+                    labels_length_by_band: Dict[int, int] = {}
+                    for band in range(1, int(sh_bands) + 1):
+                        labels_offset = int(f.tell())
+                        labels_u16 = sh_band_labels_u16[int(band)].astype("<u2", copy=False)
+                        labels_bytes = labels_u16.tobytes(order="C")
+                        f.write(labels_bytes)
+                        labels_offset_by_band[int(band)] = int(labels_offset)
+                        labels_length_by_band[int(band)] = int(len(labels_bytes))
+
+                    for band in range(1, int(sh_bands) + 1):
+                        label_count = int(sh_band_codebook_count[int(band)])
+                        for seg_start, seg_count in delta_segments:
+                            sections.append(
+                                (
+                                    _SECT_SHLB,
+                                    int(band),
+                                    int(seg_start),
+                                    int(seg_count),
+                                    int(labels_offset_by_band[int(band)]),
+                                    int(labels_length_by_band[int(band)]),
+                                )
                             )
+
+                            delta_offset = int(f.tell())
+                            delta_bytes = _build_label_delta_v1_static(
+                                segment_start_frame=int(seg_start),
+                                segment_frame_count=int(seg_count),
+                                splat_count=int(n_total),
+                                label_count=int(label_count),
+                                magic=b"SPL4DLB1",
+                            )
+                            if self_check_delta:
+                                base_labels = sh_band_labels_u16[int(band)].astype(np.uint16, copy=False)
+                                dec_start, dec_count, dec_splats, dec_labels, dec_frames = _decode_label_delta_v1(
+                                    delta_bytes,
+                                    expected_magic=b"SPL4DLB1",
+                                    base_labels_u16=base_labels,
+                                )
+                                if dec_start != int(seg_start) or dec_count != int(seg_count):
+                                    raise ValueError(
+                                        f"self-check failed: delta header mismatch band={int(band)} "
+                                        f"seg=({int(seg_start)},{int(seg_count)}) decoded=({dec_start},{dec_count})"
+                                    )
+                                if dec_splats != int(n_total) or dec_labels != int(label_count):
+                                    raise ValueError(
+                                        f"self-check failed: delta size mismatch band={int(band)} "
+                                        f"splatCount={dec_splats} labelCount={dec_labels}"
+                                    )
+                                for rel, got in enumerate(dec_frames):
+                                    if not np.array_equal(got, base_labels):
+                                        raise ValueError(
+                                            f"self-check failed: static delta decoded mismatch band={int(band)} "
+                                            f"frame={int(seg_start)+int(rel)}"
+                                        )
+                            f.write(delta_bytes)
+                            sections.append(
+                                (
+                                    _SECT_SHDL,
+                                    int(band),
+                                    int(seg_start),
+                                    int(seg_count),
+                                    int(delta_offset),
+                                    int(len(delta_bytes)),
+                                )
+                            )
+                else:
+                    # 动态 labels: 每个 segment 写自己的 base labels(允许 bytes 去重复用 offset),
+                    # 并生成真实 delta-v1 updates.
+                    labels_blob_cache_by_band: Dict[int, Dict[Tuple[bytes, int], Tuple[int, int]]] = {}
+
+                    for band in range(1, int(sh_bands) + 1):
+                        label_count = int(sh_band_codebook_count[int(band)])
+                        labels_by_frame = sh_band_labels_by_frame[int(band)]
+
+                        total_changes = 0
+                        max_update = 0
+
+                        cache = labels_blob_cache_by_band.setdefault(int(band), {})
+
+                        for seg_start, seg_count in delta_segments:
+                            # segment 边界处的“相邻帧变化量”也计入统计,但它不会写入 delta(因为该帧用 base labels 重置).
+                            if int(seg_start) > 0:
+                                boundary_prev = labels_by_frame[int(seg_start) - 1]
+                                boundary_curr = labels_by_frame[int(seg_start)]
+                                boundary_changes = int(np.count_nonzero(boundary_prev != boundary_curr))
+                                total_changes += int(boundary_changes)
+                                max_update = max(int(max_update), int(boundary_changes))
+
+                            base_labels = labels_by_frame[int(seg_start)].astype("<u2", copy=False)
+                            base_bytes = base_labels.tobytes(order="C")
+
+                            # 可选去重: 如果多段 base labels 完全一致,复用同一 offset,减少文件膨胀.
+                            digest = hashlib.blake2b(base_bytes, digest_size=16).digest()
+                            key = (digest, int(len(base_bytes)))
+                            if key in cache:
+                                base_offset, base_length = cache[key]
+                            else:
+                                base_offset = int(f.tell())
+                                f.write(base_bytes)
+                                base_length = int(len(base_bytes))
+                                cache[key] = (int(base_offset), int(base_length))
+
+                            sections.append(
+                                (
+                                    _SECT_SHLB,
+                                    int(band),
+                                    int(seg_start),
+                                    int(seg_count),
+                                    int(base_offset),
+                                    int(base_length),
+                                )
+                            )
+
+                            delta_offset = int(f.tell())
+                            res = _build_label_delta_v1_from_labels_by_frame(
+                                labels_by_frame,
+                                segment_start_frame=int(seg_start),
+                                segment_frame_count=int(seg_count),
+                                splat_count=int(n_total),
+                                label_count=int(label_count),
+                                magic=b"SPL4DLB1",
+                            )
+                            if self_check_delta:
+                                dec_start, dec_count, dec_splats, dec_labels, dec_frames = _decode_label_delta_v1(
+                                    res.delta_bytes,
+                                    expected_magic=b"SPL4DLB1",
+                                    base_labels_u16=base_labels,
+                                )
+                                if dec_start != int(seg_start) or dec_count != int(seg_count):
+                                    raise ValueError(
+                                        f"self-check failed: delta header mismatch band={int(band)} "
+                                        f"seg=({int(seg_start)},{int(seg_count)}) decoded=({dec_start},{dec_count})"
+                                    )
+                                if dec_splats != int(n_total) or dec_labels != int(label_count):
+                                    raise ValueError(
+                                        f"self-check failed: delta size mismatch band={int(band)} "
+                                        f"splatCount={dec_splats} labelCount={dec_labels}"
+                                    )
+                                for rel, got in enumerate(dec_frames):
+                                    expected = labels_by_frame[int(seg_start) + int(rel)]
+                                    if not np.array_equal(got, expected):
+                                        raise ValueError(
+                                            f"self-check failed: delta decoded mismatch band={int(band)} "
+                                            f"frame={int(seg_start)+int(rel)}"
+                                        )
+                            f.write(res.delta_bytes)
+                            sections.append(
+                                (
+                                    _SECT_SHDL,
+                                    int(band),
+                                    int(seg_start),
+                                    int(seg_count),
+                                    int(delta_offset),
+                                    int(len(res.delta_bytes)),
+                                )
+                            )
+
+                            total_changes += int(res.total_updates)
+                            max_update = max(int(max_update), int(res.max_update_count))
+
+                        # 日志统计(按全局相邻帧变化口径): changedPercent/avgUpdateCount/maxUpdateCount
+                        frame_pairs = int(max(int(frame_count) - 1, 0))
+                        if frame_pairs > 0:
+                            changed_percent = float(total_changes) / float(int(n_total) * int(frame_pairs))
+                            avg_update = float(total_changes) / float(int(frame_pairs))
+                        else:
+                            changed_percent = 0.0
+                            avg_update = 0.0
+
+                        print(
+                            f"[splat4d] sh band={int(band)} delta stats: changedPercent={changed_percent*100.0:.4f}% "
+                            f"avgUpdateCount={avg_update:.2f} maxUpdateCount={int(max_update)}"
                         )
 
         # ---- SectionTable ----
@@ -1292,10 +2050,27 @@ def main(argv: list[str]) -> int:
         help="Frame count for delta-v1 segments. Required when --shn-labels-encoding=delta-v1 (default: 0)",
     )
     parser.add_argument(
+        "--shn-frame-axis",
+        type=int,
+        default=None,
+        choices=[0, 1],
+        help=(
+            "当 checkpoint 的 splats['shN'] 是 4D 时,用于指定哪一轴是帧轴.\n"
+            "- 0: shN shape=[F,N,K,3]\n"
+            "- 1: shN shape=[N,F,K,3]\n"
+            "当 exporter 无法唯一判定(例如两个轴都等于 --frame-count)时必须显式提供."
+        ),
+    )
+    parser.add_argument(
         "--delta-segment-length",
         type=int,
         default=0,
         help="Delta segment length. 0 means single segment covering all frames (default: 0)",
+    )
+    parser.add_argument(
+        "--self-check-delta",
+        action="store_true",
+        help="导出后自检 delta-v1: 解码复原逐帧 labels,并与 exporter 内部 labels 逐元素断言一致.",
     )
     parser.add_argument(
         "--shn-codebook-sample",
@@ -1334,6 +2109,8 @@ def main(argv: list[str]) -> int:
         shn_labels_encoding=str(args.shn_labels_encoding),  # type: ignore[arg-type]
         frame_count=int(args.frame_count),
         delta_segment_length=int(args.delta_segment_length),
+        shn_frame_axis=args.shn_frame_axis,
+        self_check_delta=bool(args.self_check_delta),
         shn_codebook_sample=int(args.shn_codebook_sample),
         shn_assign_chunk=int(args.shn_assign_chunk),
         shn_kmeans_iters=int(args.shn_kmeans_iters),

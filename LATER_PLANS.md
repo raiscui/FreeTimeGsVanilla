@@ -32,13 +32,8 @@
   - SH change events: 用 quadruples `(t,d,i,k)` + sort + length encoding 代替 per-frame block,可作为 delta-v2.
   - Motion: R-VQ + "temporal quantization(11-bit in our setting)" + RANS(lossless),可考虑给 `.splat4d format v2` 增加可选的 motion 压缩 section.
 
-## 2026-02-22 07:10:28 UTC
-- 如果后续要让 `.splat4d` 的 SH 真正随时间变化(导出 delta-v1 的非 0 updateCount,或实现 delta-v2 event stream):
-  - FreeTimeGsVanilla exporter 侧需要生成真实 updates.
-  - `/workspace/gsplat-unity` 侧需要补齐 delta updates 的应用逻辑.
-    - 当前 `Editor/GsplatSplat4DImporter.cs` 对 delta-v1 会做 segment 覆盖性与 header 校验,但解码时只使用 startFrame=0 的 base labels,不会应用后续帧 deltas.
-
-## 2026-02-22 13:31:47 UTC
-- 已将上述 “`.splat4d` delta-v1 真实 updates + Unity 应用” 提升为当前进行中的任务.
-  - OpenSpec change: `openspec/changes/splat4d-delta-v1-sh-updates/`
-  - 后续实现按: `openspec/changes/splat4d-delta-v1-sh-updates/tasks.md`
+## 2026-02-22 14:47:09 UTC
+- “`.splat4d` delta-v1 真实 updates + Unity runtime 应用”已实现落地(Exporter + gsplat-unity importer/runtime).
+- 待在具备 Unity Editor 的环境里补跑验证:
+  - gsplat-unity EditMode tests(对应 `openspec/changes/splat4d-delta-v1-sh-updates/tasks.md` 的 7.3).
+  - (可选) Unity 手动 smoke: 播放/拖动 `TimeNormalized` 观察 SH rest 变化(7.4).

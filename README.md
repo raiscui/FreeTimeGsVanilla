@@ -290,7 +290,7 @@ Note:
 最小可用(bands=0,只导出 sh0+opacity):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_sog4d.py \
+python3 tools/exportor/export_sog4d.py \
   --ckpt-path /path/to/ckpt_29999.pt \
   --output-path /path/to/out.sog4d \
   --frame-count 61 \
@@ -303,7 +303,7 @@ python tools/exportor/export_sog4d.py \
 含 SH rest(bands=3,meta.version=1 + delta-v1):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_sog4d.py \
+python3 tools/exportor/export_sog4d.py \
   --ckpt-path /path/to/ckpt_29999.pt \
   --output-path /path/to/out_sh3.sog4d \
   --frame-count 61 \
@@ -319,7 +319,7 @@ python tools/exportor/export_sog4d.py \
 含 SH rest(per-band,meta.version=2 + delta-v1,推荐):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_sog4d.py \
+python3 tools/exportor/export_sog4d.py \
   --ckpt-path /path/to/ckpt_29999.pt \
   --output-path /path/to/out_sh3_perband.sog4d \
   --frame-count 61 \
@@ -343,7 +343,7 @@ python tools/exportor/export_sog4d.py \
 legacy v1(无 header,兼容旧 importer,只含 SH0; time=window):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_splat4d.py \
+python3 tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v1.splat4d \
   --splat4d-format-version 1 \
@@ -363,7 +363,7 @@ v2(有 header+sections,支持 gaussian 时间核与 SH rest):
 仅 gaussian 时间核(不导出 SH rest):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_splat4d.py \
+python3 tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2.splat4d \
   --splat4d-version 2
@@ -377,7 +377,7 @@ python tools/exportor/export_splat4d.py \
 v2 + per-band SH rest(sh1/sh2/sh3) + deltaSegments(分段长度参考 DualGS=50):
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_splat4d.py \
+python3 tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2_sh3.splat4d \
   --splat4d-version 2 \
@@ -396,15 +396,40 @@ Unity/COLMAP 坐标对齐(可选,推荐用于"相机位姿+点云"一起导入�
 - 如果你在 Unity 里还会导入"原始 COLMAP 相机位姿"(或拿它做参考),建议导出时把坐标反变换回 COLMAP 原始空间:
 ```bash
 source .venv/bin/activate
-python tools/exportor/export_splat4d.py \
+python3 tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2_sh3_colmap.splat4d \
+  --splat4d-format-version 2 \
   --splat4d-version 2 \
   --sh-bands 3 \
   --frame-count 61 \
   --delta-segment-length 50 \
   --output-space colmap \
   --colmap-dir /path/to/colmap/sparse/0
+```
+
+高质量(本仓库已验证的真实大 ckpt,可直接导入 gsplat-unity,推荐):
+```bash
+cd /cloud/cloud-ssd1/FreeTimeGsVanilla
+source .venv/bin/activate
+
+python3 tools/exportor/export_splat4d.py \
+  --ckpt results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
+  --output results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d \
+  --output-space colmap \
+  --colmap-dir results/bar_release_full/work_0_61/data/sparse/0 \
+  --splat4d-format-version 2 \
+  --splat4d-version 2 \
+  --temporal-threshold 0.01 \
+  --sh-bands 3 \
+  --frame-count 61 \
+  --shn-count 512 \
+  --shn-centroids-type f32 \
+  --shn-labels-encoding delta-v1 \
+  --delta-segment-length 50 \
+  --shn-codebook-sample 200000 \
+  --shn-kmeans-iters 10 \
+  --shn-assign-chunk 200000
 ```
 备注:
 - `--output-space` 只影响 `(position, velocity, scale, rotation)` 的坐标系.

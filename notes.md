@@ -595,3 +595,43 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
   - `design.md`: 明确跨仓库实现路径与关键取舍(GPU scatter/per-segment base labels/时间映射等).
   - `specs/**/spec.md`: 固化 exporter 与 Unity 的规范化要求(可测试场景).
   - `tasks.md`: 可追踪的实现清单.
+
+
+## 2026-02-22 14:47:09 UTC
+
+### `.splat4d v2` delta-v1 真实 updates 闭环落地(Exporter + Unity runtime)
+
+#### FreeTimeGsVanilla(exporter)
+- 真实 delta-v1:
+  - 支持动态 `splats["shN"]`(4D),对比相邻帧 labels 只写 changed 的 `(splatId,newLabel)`.
+  - per-segment base labels: 每段各自一份 base labels,避免 segment 边界语义错误.
+- 新增/增强的可验证入口:
+  - `tools/synth_dynamic_shn_ckpt.py`: 生成合成动态 `shN` ckpt(N=1024,F=5),确保至少产生一次 `updateCount>0`.
+  - `tools/exportor/export_splat4d.py --self-check-delta`: 导出后解码 delta-v1 复原逐帧 labels,逐元素断言一致.
+
+#### gsplat-unity(importer + runtime)
+- importer(v3):
+  - `.splat4d v2` 且 `labelsEncoding=delta-v1` 时,把 per-segment 的 `SHLB(base labels)` 与 `SHDL(delta bytes)` 持久化到 `GsplatAsset`.
+- runtime:
+  - `Runtime/GsplatRenderer.cs` 在 `Update` 渲染前按 `TimeNormalized` 选帧,应用 delta-v1 更新.
+  - `Runtime/Shaders/GsplatShDelta.compute` 用 GPU scatter 写入 `SHBuffer`.
+  - compute 不可用时会输出 warning 并禁用动态 SH(保持 frame0),避免黑屏/崩溃.
+
+#### 备注
+- 当前容器环境没有 Unity Editor,因此无法在此处直接跑 Unity EditMode tests(需在本机或 CI 执行).
+
+
+## 2026-02-22 16:24:34 UTC
+
+### 导出: `ckpt_29999.pt` 高质量 `.splat4d format v2`(用于 Unity)
+
+- 输入 ckpt:
+  - `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+- 输出 splat4d:
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d`
+- 关键参数(可复现):
+  - `--splat4d-format-version 2`
+  - `--splat4d-version 2`(gaussian)
+  - `--output-space colmap --colmap-dir results/bar_release_full/work_0_61/data/sparse/0`
+  - `--sh-bands 3 --frame-count 61 --shn-count 512 --shn-centroids-type f32 --shn-labels-encoding delta-v1 --delta-segment-length 50`
+  - `--shn-codebook-sample 200000 --shn-kmeans-iters 10`

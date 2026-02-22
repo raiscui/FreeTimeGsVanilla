@@ -271,3 +271,43 @@ python tools/exportor/export_splat4d.py \
   - change dir: `openspec/changes/splat4d-delta-v1-sh-updates/`
   - artifacts: `proposal.md`, `design.md`, `specs/**/spec.md`, `tasks.md`
   - 状态: apply-ready(后续可以直接按 `tasks.md` 进入实现阶段)
+
+## 2026-02-22 14:47:09 UTC
+- 完成 `.splat4d format v2` delta-v1 的“真实 updates”闭环(Exporter + Unity runtime).
+- FreeTimeGsVanilla(exporter):
+  - `tools/exportor/export_splat4d.py` 支持动态 `splats["shN"]`(4D),生成逐帧 labels 并写入 delta-v1 updates(仅写 changed `(splatId,newLabel)`).
+  - per-segment base labels: 每个 segment 写一份 SHLB base labels,并为每段写 SHDL(delta bytes),保证 segment 边界语义正确.
+  - 新增 `--shn-frame-axis` 与 `--self-check-delta`,并输出 delta stats(changedPercent/avg/maxUpdateCount).
+  - 新增 `tools/synth_dynamic_shn_ckpt.py` 作为可重复验证样例(确保至少出现 `updateCount>0`).
+- gsplat-unity(importer + runtime):
+  - `Editor/GsplatSplat4DImporter.cs`(v3)在 delta-v1 时把 per-segment 的 base labels/delta bytes 持久化到 `Runtime/GsplatAsset.cs`.
+  - `Runtime/GsplatRenderer.cs` 运行时按 `TimeNormalized` 选帧应用 deltas,用 compute scatter 更新 `SHBuffer`.
+  - 新增 `Runtime/Shaders/GsplatShDelta.compute` 与 `Tests/Editor/GsplatSplat4DImporterDeltaV1Tests.cs`,并更新 `CHANGELOG.md`.
+- 验证(当前容器可执行部分):
+  - `python3 -m compileall -q tools/exportor tools src datasets` 通过.
+  - 合成 ckpt + exporter 自检通过,并确认存在非 0 updates:
+    - `python3 tools/synth_dynamic_shn_ckpt.py --output results/synth_delta_v1_verify/ckpt_synth_dynamic_shn_f5_n1024_axis0.pt --frames 5 --splats 1024 --sh-bands 3 --shn-frame-axis 0`
+    - `python3 tools/exportor/export_splat4d.py --ckpt results/synth_delta_v1_verify/ckpt_synth_dynamic_shn_f5_n1024_axis0.pt --output results/synth_delta_v1_verify/ckpt_synth_dynamic_shn_f5_n1024_axis0_v2_sh3_delta_seg2_k8_f32.splat4d --splat4d-format-version 2 --splat4d-version 2 --sh-bands 3 --frame-count 5 --shn-frame-axis 0 --shn-count 8 --shn-centroids-type f32 --shn-labels-encoding delta-v1 --delta-segment-length 2 --shn-codebook-sample 4000 --shn-kmeans-iters 5 --shn-assign-chunk 2048 --self-check-delta`
+    - exporter 输出: `sh band=1 delta stats ... maxUpdateCount=120`.
+- 待补跑(需要 Unity Editor 环境):
+  - 运行 gsplat-unity 的 EditMode tests(含新增 delta-v1 测试).
+  - (可选) 手动拖动/播放 `TimeNormalized` 观察 SH rest 随帧变化.
+
+## 2026-02-22 16:24:34 UTC
+- 按你的请求,从真实大 ckpt 输出一份“高质量 + 最新 exporter 行为”的 `.splat4d format v2`(用于 Unity):
+  - 输入 ckpt: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+  - 输出 splat4d: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d`
+  - 关键特性:
+    - format v2(header+sections,`SPL4DV02`)
+    - timeModel=2(gaussian)
+    - SH per-band(1..3) + labelsEncoding=delta-v1 + segments(frameCount=61,segLen=50)
+    - output-space=colmap(包含 `XFRM` section 记录 `colmap->train` transform,导出时对 records 做 train->colmap 反变换)
+- 轻量校验:
+  - header: splatCount=1,335,131,shBands=3,timeModel=2,frameCount=61
+  - sections: `RECS/META/XFRM` + 每 band 的 `SHCT/SHLB/SHDL`,并且 segments 覆盖 `[0,50]` 与 `[50,11]`.
+
+## 2026-02-22 16:43:40 UTC
+- 按你要求更新 `README.md` 的“高质量输出命令写法”:
+  - `Export (Unity) -> Export .splat4d (binary)` 增加一条“已验证的真实大 ckpt”导出命令,直接输出到:
+    - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d`
+  - 同时把 Export 小节里的示例命令统一改为 `python3 ...`,避免环境里 `python` 指向不一致导致的误用.
