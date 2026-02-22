@@ -244,3 +244,9 @@ python tools/exportor/export_splat4d.py \
 - 验证:
   - `python3 -m py_compile tools/exportor/export_sog4d.py`
   - `python3 -m compileall -q tools/exportor`
+
+## 2026-02-22 09:11:06 UTC
+- 合并分叉: 将 `00eb763` 合并进本地 `main`,并解决冲突(WORKLOG/notes/task_plan).
+  - merge commit: `6929ad7`
+  - 状态记录 commit: `0b57500`
+- 已推送到 `origin/main`(使用 `direnv exec . git push ...` 读取 `.envrc.private` 凭据).
