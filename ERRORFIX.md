@@ -103,3 +103,36 @@
   - `python3 -m compileall -q src datasets tools/exportor`
 - 最小导出 + magic 检查:
   - 用最小 ckpt 导出 `--splat4d-version 2`(不指定 format),确认输出前 8 bytes 为 `SPL4DV02`.
+
+## 2026-02-22 15:39:40 +0800 - `.sog4d` exporter 输出的 meta.json 不符合 gsplat-unity 导入约束
+
+### 问题
+用户使用本仓库 `tools/exportor/export_sog4d.py` 导出的 `.sog4d` 在 gsplat-unity(Unity 插件)侧出现:
+- 离线校验失败:
+  - `[sog4d][error] meta.json.format 非法: None`
+- Unity importer 解析失败或行为异常:
+  - `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 使用 `[[x,y,z]]`,
+    但 Unity `JsonUtility` 解析 `Vector3` 需要 `{x,y,z}`.
+
+### 原因
+`export_sog4d.py` 写 meta.json 时:
+- 缺少顶层字段 `format="sog4d"`.
+- float3 数组以 list-of-3 输出(`[[x,y,z], ...]`),不符合 gsplat-unity(Unity)读者实现的 JSON 形态约定.
+
+### 修复(落地)
+- 修改 `tools/exportor/export_sog4d.py`:
+  - meta.json 顶层补齐 `format="sog4d"`.
+  - `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 输出改为 Vector3 JSON:
+    - `[{"x":..,"y":..,"z":..}, ...]`.
+- 同步更新 `tools/exportor/spec.md`:
+  - 增加 `meta.json.format` 的 MUST 约束.
+  - 明确 float3 的 JSON 序列化形态必须为 `{x,y,z}`.
+
+### 验证方式
+- 语法冒烟:
+  - `python3 -m py_compile tools/exportor/export_sog4d.py`
+  - `python3 -m compileall -q tools/exportor`
+- 端到端(需要真实 ckpt 导出):
+  - 用修复后的 exporter 导出 `.sog4d`,确认 gsplat-unity:
+    - `validate` 直接通过.
+    - Unity importer 能直接导入,无需再跑 `normalize-meta`.
