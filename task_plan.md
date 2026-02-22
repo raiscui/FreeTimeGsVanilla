@@ -784,3 +784,36 @@
 
 ## 状态
 **目前在阶段6**: 已完成现状盘点.结论是 `gsplat-unity` 已实现 `.splat4d format v2` 的 per-band SH rest 解码,并支持 deltaSegments(校验段覆盖与 delta header).当前无需额外改动即可导入本仓库输出.
+
+
+# 任务计划: 合并本地 `main` 到指定 commit `00eb763`(解决与 `origin/main` 的分叉)
+
+## 目标
+把当前本地 `main`(HEAD)与指定 commit `00eb76344e8b6a43d83b96b8b04fb8fa6c82f391` 的变更合并到同一条历史上.
+这样本地与 `origin/main` 不再分叉,后续可以正常 push/pull.
+
+## 阶段
+- [ ] 阶段1: 计划和设置(确认分叉关系,做备份分支)
+- [ ] 阶段2: 执行合并(merge)并处理冲突(如有)
+- [ ] 阶段3: 验证与同步(最小检查 + 更新远端)
+
+## 现状诊断(事实)
+- 当前 `main` 与 `00eb763` 互不为祖先.
+- merge-base 是 `b7ae7e3`(`export splat4d`),说明两边从该点开始分叉.
+
+## 方案方向(至少二选一)
+
+### 方向A: merge(本次采用,保留双方历史,不改写)
+- 在本地 `main` 上执行 `git merge 00eb763`.
+- 产物是一个 merge commit,包含两边改动.
+- 优点: 不需要 force push,风险更小,符合你这次“合并”诉求.
+
+### 方向B: rebase(历史更线性,但会改写)
+- `git rebase 00eb763` 把本地提交挪到对方之上.
+- 需要 `--force-with-lease` 推送,协作风险更高.
+
+## 做出的决定
+- [2026-02-22 09:02:37 UTC] 选择方向A: merge.
+
+## 状态
+**目前在阶段1**: 将先创建一个备份分支,然后把 `00eb763` merge 进当前 `main`,最后做最小验证并推送到 `origin/main`.
