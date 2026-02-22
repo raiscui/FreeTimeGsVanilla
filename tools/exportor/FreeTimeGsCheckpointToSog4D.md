@@ -410,9 +410,14 @@ SH rest(v1/v2,由 `--sh-version` 控制):
 - `--min-sigma`
 
 文件格式版本:
-- `--splat4d-format-version 1|2`
+- `--splat4d-format-version 0|1|2`(默认 0=auto,推荐)
+  - 0: auto(更安全的默认值).
+    - 当 `--splat4d-version=2`(timeModel=2,gaussian)时,默认选择 format v2(header+sections),避免 Unity 走 legacy v1 导入.
+    - 当 `--sh-bands>0` 时,也会自动选择 format v2(因为 legacy v1 承载不了 SH rest/deltaSegments).
+    - 其它情况默认选择 format v1(legacy,无 header).
   - 1: legacy(无 header,64B/record),仅承载 SH0 与 4D 字段,兼容旧 importer.
-  - 2: header+sections,用于承载 gaussian 时间核与 SH rest(per-band/deltaSegments).
+    - 注意: 如果你用 `--splat4d-version=2` 但强制 format=1,旧 importer 仍可能按 window(time0+duration)解释,观感容易变薄/稀疏.
+  - 2: header+sections(文件头 magic=`SPL4DV02`),用于承载 timeModel 与扩展 sections(例如 SH rest per-band/deltaSegments).
 
 版本语义:
 - `--splat4d-version 1|2`
@@ -423,10 +428,10 @@ v1 专用:
 - `--temporal-threshold`(默认 0.01,用于把 sigma 近似为窗口)
 
 v2(gaussian)补充:
-- `--temporal-threshold` 会作为 runtime 的 gaussian cutoff 写入 `.splat4d v2` meta.
+- `--temporal-threshold` 会作为 runtime 的 gaussian cutoff 写入 `.splat4d format v2` 的 META section.
   - 例如 0.01 表示当 temporalWeight < 0.01 时视为不可见(同时也用于 bounds padding 的保守估算).
 
-SH rest(可选,需要 `--splat4d-format-version 2`):
+SH rest(可选,需要 `--splat4d-format-version 2` 或默认的 `--splat4d-format-version 0`):
 - `--sh-bands 0..3`(默认 0)
 - `--shn-count`(默认 512)
 - `--shn-centroids-type f16|f32`(默认 f16)
@@ -448,7 +453,8 @@ SH rest(可选,需要 `--splat4d-format-version 2`):
   - `--frame-count 5`
   - 建议加 `--max-splats 50000` 做快速冒烟
 - `.splat4d`:
-  - `--splat4d-version 2`(如果你的 importer 支持 v2)
+  - `--splat4d-version 2`(gaussian,timeModel=2)
+  - 建议保持 `--splat4d-format-version` 默认(auto),确保输出带 `SPL4DV02` header,让 Unity importer 稳定走 v2 路径
 
 2) 用 Unity importer 验证:
 - 能导入(不会在 Console 报 import error)

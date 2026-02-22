@@ -352,15 +352,27 @@ python tools/exportor/export_splat4d.py \
 
 v2(有 header+sections,支持 gaussian 时间核与 SH rest):
 
+两个参数的区别(不是重复概念):
+- `--splat4d-version`: 控制 time/duration 的语义.
+  - 1=window(旧语义,time=time0,duration=windowLen)
+  - 2=gaussian(新语义,time=mu_t,duration=sigma)
+- `--splat4d-format-version`: 控制文件是否带 v2 header+sections.
+  - 1=legacy(无 header,只有 64B/record)
+  - 2=format v2(文件头 magic=`SPL4DV02`,可承载 timeModel/SH rest/deltaSegments)
+
 仅 gaussian 时间核(不导出 SH rest):
 ```bash
 source .venv/bin/activate
 python tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2.splat4d \
-  --splat4d-format-version 2 \
   --splat4d-version 2
 ```
+
+备注:
+- exporter 默认 `--splat4d-format-version 0(auto)`.
+  当你使用 `--splat4d-version 2`(或 `--sh-bands > 0`)时,auto 会自动选择 format v2,确保输出带 `SPL4DV02` header.
+  如果你想强制指定,再显式加 `--splat4d-format-version 2`.
 
 v2 + per-band SH rest(sh1/sh2/sh3) + deltaSegments(分段长度参考 DualGS=50):
 ```bash
@@ -368,7 +380,6 @@ source .venv/bin/activate
 python tools/exportor/export_splat4d.py \
   --ckpt /path/to/ckpt_29999.pt \
   --output /path/to/out_v2_sh3.splat4d \
-  --splat4d-format-version 2 \
   --splat4d-version 2 \
   --temporal-threshold 0.01 \
   --sh-bands 3 \

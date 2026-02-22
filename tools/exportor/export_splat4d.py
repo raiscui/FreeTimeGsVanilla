@@ -437,8 +437,11 @@ def export_splat4d_from_ckpt(
     shn_kmeans_iters: int,
     seed: int,
 ) -> None:
-    if splat4d_format_version not in (1, 2):
-        raise ValueError("--splat4d-format-version must be 1 or 2")
+    # `splat4d_version` 控制 time/duration 的语义(window vs gaussian),
+    # `splat4d_format_version` 控制文件是否带 header(legacy vs header+sections).
+    # 这两者是正交概念,但为了避免误用,我们允许 format=0(auto) 来推导一个更安全的默认值.
+    if splat4d_format_version not in (0, 1, 2):
+        raise ValueError("--splat4d-format-version must be 0(auto), 1 or 2")
     if splat4d_version not in (1, 2):
         raise ValueError("--splat4d-version must be 1 or 2")
     if splat4d_version == 1 and not (0.0 < temporal_threshold < 1.0):
@@ -451,8 +454,37 @@ def export_splat4d_from_ckpt(
         raise ValueError("--base-opacity-threshold must be in [0, 1]")
     if not (0 <= sh_bands <= 3):
         raise ValueError("--sh-bands must be in [0,3]")
-    if sh_bands > 0 and splat4d_format_version != 2:
-        raise ValueError("SH rest export requires --splat4d-format-version 2")
+
+    # -----------------------------
+    # format version auto-resolve
+    # -----------------------------
+    if int(splat4d_format_version) == 0:
+        reasons: List[str] = []
+        if int(splat4d_version) == 2:
+            # timeModel=2(gaussian) 如果用 legacy v1(无 header)导出,Unity importer 往往只能走 window 路径,
+            # 很容易出现"薄层/稀疏"的裁剪伪影.因此默认改为 format v2.
+            reasons.append("timeModel=2(gaussian)")
+        if int(sh_bands) > 0:
+            # SH rest/deltaSegments 只能放在 header+sections 里.
+            reasons.append(f"sh_bands={int(sh_bands)}")
+
+        chosen = 2 if reasons else 1
+        reason_text = ", ".join(reasons) if reasons else "default"
+        print(f"[splat4d] format=auto -> v{chosen} ({reason_text})")
+        splat4d_format_version = int(chosen)
+
+    if sh_bands > 0 and int(splat4d_format_version) != 2:
+        raise ValueError("SH rest export requires --splat4d-format-version 2 (or 0=auto)")
+
+    if int(splat4d_format_version) == 1 and int(splat4d_version) == 2:
+        # 这是一个“技术上可写,但语义上容易被 importer 误读”的组合.
+        # 允许继续导出,但必须给一个醒目 warning,避免用户以为"v2 gaussian"就一定会走 v2 importer.
+        print(
+            "[splat4d][warn] 你选择了: --splat4d-version 2(timeModel=2) + --splat4d-format-version 1(legacy无header).\n"
+            "[splat4d][warn] 旧 importer 可能会按 window(time0+duration)解释,导致显示变薄/稀疏.\n"
+            "[splat4d][warn] 建议: 去掉 --splat4d-format-version 或改用 --splat4d-format-version 2.",
+            file=sys.stderr,
+        )
     if delta_segment_length < 0:
         raise ValueError("--delta-segment-length must be >= 0")
     if sh_bands > 0:
@@ -903,9 +935,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--splat4d-format-version",
         type=int,
-        default=1,
-        choices=[1, 2],
-        help="文件格式版本: 1=legacy无header(仅SH0); 2=header+sections(支持SH rest与deltaSegments)",
+        default=0,
+        choices=[0, 1, 2],
+        help="文件格式版本: 0=auto(默认,推荐); 1=legacy无header(仅SH0); 2=header+sections(支持SH rest与deltaSegments)",
     )
 
     parser.add_argument(

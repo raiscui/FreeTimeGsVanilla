@@ -671,3 +671,82 @@
 - [2026-02-21 16:39:25 UTC] push 已完成并验证:
   - push: `git push -u origin main` 成功,远端从 `911dcf4` 前进到 `2965f15`
   - 验证: `git ls-remote origin refs/heads/main` 返回 sha 与本地 `git rev-parse HEAD` 一致
+
+
+# 任务计划: 修复 `.splat4d` 导出默认值导致 Unity 走 legacy v1 导入
+
+## 目标
+当我在本仓库导出 `.splat4d` 想表达 timeModel=2(gaussian, time=mu_t,duration=sigma)时,默认输出应带 `SPL4DV02` header(format v2).
+这样 Unity importer 可以稳定走 v2 路径,不需要依赖 v1 的启发式自动识别,也避免出现"薄层/稀疏"的时间裁剪伪影.
+
+## 阶段
+- [x] 阶段1: 计划和设置
+- [x] 阶段2: 定位根因与方案选择
+- [x] 阶段3: 执行改动(exporter + docs)
+- [x] 阶段4: 冒烟验证(导出 + 检查 header/TimeModel)
+- [x] 阶段5: 回写记录(WORKLOG/notes/LATER_PLANS)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,从根源消除误用)
+- 在 `tools/exportor/export_splat4d.py` 增加 `--splat4d-format-version auto`(作为默认值).
+  - auto 规则:
+    - 当 `--splat4d-version=2`(timeModel=2)时,默认选择 format v2(header+sections).
+    - 当 `--sh-bands>0` 时,必须选择 format v2(已有约束).
+    - 其它情况默认选择 format v1(legacy,无 header).
+- 当用户显式指定了"高风险组合"(例如 `--splat4d-version 2` + `--splat4d-format-version 1`)时,打印醒目的 warning,避免再次踩坑.
+- 同步更新 README 与导出文档,把 `timeModel` 与 `formatVersion` 的概念拆开讲清楚.
+
+### 方向B: 先能用,后面再优雅(改动最少,但仍会复发)
+- 不改代码逻辑,只更新文档,强制要求导出 gaussian 时必须显式加 `--splat4d-format-version 2`.
+- 代价: 人很容易忘,仍可能再次生成"名字叫 v2,但没 header"的文件.
+
+## 关键问题
+1. 当前 exporter 同时存在两套概念:
+   - `--splat4d-version`: 控制 time/duration 的语义(v1 window vs v2 gaussian).
+   - `--splat4d-format-version`: 控制文件是否带 `SPL4DV02` header(legacy vs header+sections).
+   但默认 `--splat4d-format-version=1`,导致用户只改 `--splat4d-version=2` 时仍会输出无 header 文件.
+2. Unity importer 以 header 判断走 v1/v2.无 header 会走 legacy v1 路径,从而按 window(time0+duration)裁剪.
+3. 对于 timeModel=2 的数据,按 window 裁剪会把可见 splat 压成很薄的时间切片,观感变"薄层/稀疏".
+
+## 做出的决定
+- [2026-02-22 02:29:00 UTC] 选择方向A: 增加 auto 默认,并加 warning + 文档对齐.
+
+## 状态
+**目前在阶段5**: 已完成 exporter 修复,文档同步,冒烟验证,并回写四文件.
+
+
+# 任务计划: 导出高质量 `.splat4d v2`(gaussian + per-band SH rest)
+
+## 目标
+用现有 ckpt `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`,导出一份高质量 `.splat4d format v2`:
+- timeModel=2(gaussian): `time=mu_t`, `duration=sigma`
+- SH rest: per-band(`sh1/sh2/sh3`) + labelsEncoding=delta-v1
+- deltaSegments: 采用 DualGS 常用 segmentLen=50(可随机访问/更接近论文)
+
+## 阶段
+- [x] 阶段1: 计划和设置
+- [x] 阶段2: 确认参数(质量/速度/体积权衡)
+- [x] 阶段3: 执行导出(跑 exporter)
+- [x] 阶段4: 验证产物(header/magic/尺寸/日志统计)
+- [x] 阶段5: 回写记录(WORKLOG/notes)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(本次选用,更高质量)
+- `--shn-count` 提升到 1024(更细的 codebook,SH 误差更小).
+- `--shn-centroids-type f32`(中心用 f32,减少量化误差;体积略增).
+- `--shn-codebook-sample` 提升到 300000(更稳的聚类统计).
+- `--shn-kmeans-iters` 提升到 20(更充分收敛).
+- `--delta-segment-length 50`(对齐 DualGS 常用段长).
+
+### 方向B: 先能用,后面再优雅(更快导出)
+- `--shn-count 512` + `--shn-centroids-type f16` + `--shn-codebook-sample 100000` + `--shn-kmeans-iters 10`.
+- 收益: 导出更快,CPU 压力更小.
+- 代价: SH 误差通常更大(尤其在高频细节上).
+
+## 做出的决定
+- [2026-02-22 03:07:18 UTC] 选择方向A: 先导出一份更高质量版本用于 Unity 最终测试.
+
+## 状态
+**目前在阶段5**: 已完成高质量 `.splat4d format v2` 导出与验证(确认 magic=`SPL4DV02`),并回写记录.

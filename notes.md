@@ -442,3 +442,60 @@ python tools/exportor/export_splat4d.py \
   - 可以保持 format v2 的 section 机制不变,增加一个可选的 motion 压缩 section:
     - velocity/time/sigma 做定点量化(例如 10-16 bit),再做熵编码.
   - 这样可以在不破坏现有 float32 路径的情况下,逐步逼近“低端设备可播”的目标.
+
+
+## 2026-02-22 02:33:37 UTC 追加: `.splat4d` exporter 默认值导致 Unity 走 legacy v1 导入
+
+### 现象(来自 Unity 侧离线统计与导入行为)
+- `ckpt_29999_v2_gaussian.splat4d` 文件名带 v2,但实际上无 `SPL4DV02` header.
+- Unity importer 会把它当作 v1(legacy无 header)导入,并按 window(time0+duration)裁剪.
+- 对 time/duration 分布更像 gaussian(mu+sigma)的场景,按 window 裁剪会出现"薄层/稀疏"的可见性伪影.
+
+### 根因(本仓库 exporter 的两个正交概念被默认值混淆)
+- `tools/exportor/export_splat4d.py` 里有两套概念:
+  - `--splat4d-version`: time/duration 的语义(1=window,2=gaussian).
+  - `--splat4d-format-version`: 文件格式(1=legacy无 header,2=header+sections).
+- 旧默认值是 `--splat4d-format-version=1`.
+  因此只写 `--splat4d-version 2` 会输出"gaussian 语义 + legacy 无 header"的文件.
+  Unity 侧如果仅靠 header 判断 v1/v2,就会走错导入路径.
+
+### 修复(已落地)
+- 给 exporter 增加更安全的默认值:
+  - `--splat4d-format-version` 新增 `0=auto` 并作为默认.
+  - auto 规则:
+    - `--splat4d-version=2` 时,默认输出 format v2(header+sections),确保带 `SPL4DV02` header 与 timeModel.
+    - `--sh-bands>0` 时,也会自动选择 format v2(legacy 承载不了 SH rest/deltaSegments).
+    - 其它情况默认输出 format v1(legacy).
+- 当用户显式指定 `--splat4d-version 2` + `--splat4d-format-version 1` 时,在 stderr 打印醒目的 warning,避免再踩坑.
+- 同步更新文档:
+  - `README.md` 补充 auto 默认的备注.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 把 timeModel vs formatVersion 拆开说明,并强调 gaussian 建议输出带 header.
+
+### 冒烟验证(本机最小 ckpt)
+```bash
+source .venv/bin/activate
+python3 tools/exportor/export_splat4d.py \
+  --ckpt /tmp/splat4d_smoke_ckpt.pt \
+  --output /tmp/splat4d_smoke_gaussian_auto.splat4d \
+  --splat4d-version 2
+python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))"
+```
+- 预期输出前 8 bytes 为 `b'SPL4DV02'`,表示 header 存在,Unity importer 会稳定走 v2.
+
+## 2026-02-22 03:53:03 UTC 追加: 高质量 `.splat4d v2 + sh3 + seg50` 实际导出产物
+
+### 产物
+- 输入 ckpt: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+- 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f16.splat4d`
+- 文件头 magic: `SPL4DV02`(说明带 header,Unity importer 应走 v2)
+
+### 参数(核心)
+- `--splat4d-version 2`(timeModel=2,gaussian)
+- `--sh-bands 3`(per-band SH rest: sh1/sh2/sh3)
+- `--frame-count 61 --delta-segment-length 50`(deltaSegments,共 2 段)
+- `--shn-count 512 --shn-centroids-type f16 --shn-codebook-sample 200000 --shn-kmeans-iters 10`
+
+### 用途
+- 这份文件用于验证 Unity 侧的 v2 importer 是否已完整支持:
+  - header v2 + timeModel=2(gaussian)
+  - per-band SH centroids + base labels + delta-v1 blocks

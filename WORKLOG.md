@@ -191,3 +191,34 @@ python tools/exportor/export_splat4d.py \
 ## 2026-02-21 16:39:25 UTC
 - 完成推送到你的仓库: `git push -u origin main` -> `https://github.com/raiscui/FreeTimeGsVanilla.git`.
 - 验证远端 `origin/main` 与本地 `HEAD` 一致(sha=`2965f15`),并确认本地 `main` 已跟踪 `origin/main`.
+
+## 2026-02-22 02:33:37 UTC
+- 修复 `.splat4d` 导出脚本的一个高频误用点: 当用户想导出 timeModel=2(gaussian)时,旧默认会输出 legacy v1(无 header)文件,导致 Unity importer 仅靠 header 判定时走错 v1 路径,出现"薄层/稀疏"的裁剪伪影.
+- exporter 改动:
+  - `tools/exportor/export_splat4d.py` 新增 `--splat4d-format-version 0=auto` 并作为默认值.
+  - auto 规则: `--splat4d-version=2` 或 `--sh-bands>0` 时默认输出 format v2(header+sections,magic=`SPL4DV02`),否则输出 legacy v1.
+  - 当用户显式指定 `--splat4d-version 2` + `--splat4d-format-version 1` 时,在 stderr 打印醒目 warning,避免继续误用.
+- 文档同步:
+  - `README.md` 补充 `--splat4d-format-version` 的 auto 默认说明.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 更新为 `0|1|2`,并把 timeModel vs formatVersion 拆开说明.
+- 验证:
+  - `python3 -m compileall -q src datasets tools/exportor`
+  - 用最小 ckpt 导出并检查二进制头:
+    - `python3 tools/exportor/export_splat4d.py --splat4d-version 2`(不指定 format)会打印 `format=auto -> v2` 且输出文件前 8 bytes 为 `SPL4DV02`.
+
+## 2026-02-22 02:37:54 UTC
+- 使用修复后的默认值,重新导出一份"带 header"的 gaussian `.splat4d`,用于直接替换 Unity 侧的旧文件:
+  - 输入 ckpt: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+  - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_gaussian_fmt2.splat4d`(magic=`SPL4DV02`)
+
+## 2026-02-22 03:53:03 UTC
+- 重新用同一 ckpt 导出一份“高质量 v2(gaussian) + per-band SH rest + deltaSegments”的 `.splat4d format v2`,用于 Unity 最终观感测试:
+  - 输入 ckpt: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+  - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f16.splat4d`
+  - 关键参数:
+    - `--splat4d-version 2`(timeModel=2,gaussian)
+    - `--sh-bands 3`(sh1/sh2/sh3 per-band codebook)
+    - `--frame-count 61 --delta-segment-length 50`(deltaSegments,分 2 段)
+    - `--shn-count 512 --shn-centroids-type f16 --shn-codebook-sample 200000`
+  - 快速验证:
+    - 读取文件前 8 bytes 为 `SPL4DV02`

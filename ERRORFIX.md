@@ -70,3 +70,36 @@
 - COLMAP 在该参数配置下稳定跑通,不再出现 SIGKILL.
 - 预处理成功产出逐帧点云:
   - `results/bar-release_smoke_work/triangulation/points3d_frame000000.npy` 等.
+
+## 2026-02-22 02:33:37 UTC - `.splat4d` gaussian 导出无 header 导致 Unity 走 legacy v1
+
+### 问题
+- 用户导出 `.splat4d` 期望表达 timeModel=2(gaussian,time=mu_t,duration=sigma),但生成的文件无 `SPL4DV02` header.
+- Unity importer 如果仅靠 header 判定 v1/v2,会走 legacy v1 导入,并按 window(time0+duration)裁剪,表现为"薄层/稀疏".
+
+### 原因
+- `tools/exportor/export_splat4d.py` 有两套正交概念:
+  - `--splat4d-version`: time/duration 语义(1=window,2=gaussian).
+  - `--splat4d-format-version`: 文件格式(1=legacy无 header,2=header+sections).
+- 旧默认 `--splat4d-format-version=1`,导致只写 `--splat4d-version 2` 时仍会输出 legacy 无 header 文件,从而触发 Unity 侧误判.
+
+### 修复思路
+- 从根源消除默认值误用:
+  - 增加 `--splat4d-format-version 0=auto` 并作为默认.
+  - 当 `--splat4d-version=2` 时,auto 自动选择 format v2(header+sections),确保带 `SPL4DV02` 与 timeModel 字段.
+- 对高风险组合保留兼容但给 warning:
+  - `--splat4d-version 2` + `--splat4d-format-version 1` 仍允许导出,但在 stderr 打印醒目 warning.
+
+### 实际修复(落地)
+- 修改 `tools/exportor/export_splat4d.py`:
+  - `--splat4d-format-version` 支持 `0|1|2`,默认 `0`.
+  - auto 规则: `splat4d-version=2` 或 `sh-bands>0` 时选择 format v2,否则选择 format v1.
+- 同步更新文档:
+  - `README.md`
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md`
+
+### 验证方式
+- 语法冒烟:
+  - `python3 -m compileall -q src datasets tools/exportor`
+- 最小导出 + magic 检查:
+  - 用最小 ckpt 导出 `--splat4d-version 2`(不指定 format),确认输出前 8 bytes 为 `SPL4DV02`.
