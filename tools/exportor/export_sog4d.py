@@ -47,6 +47,19 @@ ZipCompression = Literal["stored", "deflated"]
 TimeMappingType = Literal["uniform", "explicit"]
 
 
+def _vec3_to_json_obj(v: np.ndarray | list[float] | tuple[float, float, float]) -> Dict[str, float]:
+    """
+    把 float3 转为 Unity `JsonUtility` 可解析的 Vector3 JSON 形态:
+    - {"x": .., "y": .., "z": ..}
+
+    说明:
+    - gsplat-unity(Unity)侧的 `.sog4d` importer 用 `Vector3[]` 接收这些字段,
+      因此不能写成 `[[x,y,z], ...]` 的 list-of-3.
+    """
+    # 这里允许输入 numpy array 或普通 list/tuple,方便调用处保持最小改动.
+    return {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}
+
+
 def _stable_sigmoid(x: np.ndarray) -> np.ndarray:
     """
     数值稳定的 sigmoid,避免极端 logit 下溢/上溢.
@@ -1009,8 +1022,11 @@ def export_sog4d_from_ckpt(
     else:  # pragma: no cover
         raise ValueError(f"unknown zip_compression: {zip_compression}")
 
-    range_min_list: List[List[float]] = []
-    range_max_list: List[List[float]] = []
+    # 注意: rangeMin/rangeMax 是 float3 数组.
+    # 为了让 Unity `JsonUtility` 能直接解析为 `Vector3[]`,
+    # 我们必须输出为 object 形态: [{"x":..,"y":..,"z":..}, ...]
+    range_min_list: List[Dict[str, float]] = []
+    range_max_list: List[Dict[str, float]] = []
 
     eps = np.float32(1e-8)
     with zipfile.ZipFile(tmp_path, mode="w", compression=zip_comp, **zip_kwargs) as zf:
@@ -1092,8 +1108,8 @@ def export_sog4d_from_ckpt(
             pos = means + velocities * dt.reshape(-1, 1)  # [N,3]
             pos_min = pos.min(axis=0).astype(np.float32)
             pos_max = pos.max(axis=0).astype(np.float32)
-            range_min_list.append([float(pos_min[0]), float(pos_min[1]), float(pos_min[2])])
-            range_max_list.append([float(pos_max[0]), float(pos_max[1]), float(pos_max[2])])
+            range_min_list.append(_vec3_to_json_obj(pos_min))
+            range_max_list.append(_vec3_to_json_obj(pos_max))
 
             hi, lo = _quantize_u16_hi_lo(pos, range_min=pos_min, range_max=pos_max)  # [N,3] u8
 
@@ -1235,6 +1251,8 @@ def export_sog4d_from_ckpt(
                 sh_stream[band_name] = band_stream
 
         meta: Dict[str, object] = {
+            # 读者实现(gsplat-unity)要求该字段存在,用于 fail-fast 识别 bundle 类型.
+            "format": "sog4d",
             "version": int(meta_version),
             "splatCount": int(n_total),
             "frameCount": int(frame_count),
@@ -1252,7 +1270,8 @@ def export_sog4d_from_ckpt(
                     "loPath": "frames/{frame}/position_lo.webp",
                 },
                 "scale": {
-                    "codebook": scale_res.codebook_lin.astype(np.float32).tolist(),
+                    # 同 `rangeMin/rangeMax`,这里也必须输出为 Vector3 JSON object 形态.
+                    "codebook": [_vec3_to_json_obj(v) for v in scale_res.codebook_lin.astype(np.float32)],
                     "indicesPath": "frames/{frame}/scale_indices.webp",
                 },
                 "rotation": {"path": "frames/{frame}/rotation.webp"},

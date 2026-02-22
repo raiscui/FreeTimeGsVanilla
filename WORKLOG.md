@@ -230,3 +230,17 @@ python tools/exportor/export_splat4d.py \
 - 结论: 当前 `gsplat-unity` 已经实现相关解析/解码逻辑,无需额外改动即可消费本仓库导出的 `.splat4d v2`:
   - `Editor/GsplatSplat4DImporter.cs` 支持 `SPL4DV02` header+sections,并读取 `SHCT/SHLB/SHDL` 解码到 `GsplatAsset.SHs`.
   - 对 `labelsEncoding=delta-v1` 会校验 segments 覆盖性与 delta header(当前 exporter 默认 `updateCount=0`,因此仅用 base labels 也能得到正确结果).
+
+## 2026-02-22 15:39:40 +0800
+- 修复 `.sog4d` exporter 的 meta.json schema,避免导入 Unity 前就失败:
+  - `tools/exportor/export_sog4d.py`:
+    - meta.json 顶层补齐 `format="sog4d"`(gsplat-unity 侧用于 fail-fast).
+    - `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 的 float3 数组改为 Vector3 JSON:
+      - 输出为 `[{"x":..,"y":..,"z":..}, ...]`,而不是 `[[x,y,z], ...]`.
+      - 目的: 兼容 Unity `JsonUtility` 解析 `Vector3[]`.
+  - `tools/exportor/spec.md`:
+    - 补齐 `meta.json.format` 的 MUST 约束.
+    - 明确 float3 的 JSON 序列化形态必须为 `{x,y,z}`.
+- 验证:
+  - `python3 -m py_compile tools/exportor/export_sog4d.py`
+  - `python3 -m compileall -q tools/exportor`

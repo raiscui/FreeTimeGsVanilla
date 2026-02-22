@@ -526,3 +526,23 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
 - 这和我们当前 exporter 的默认实现是匹配的(目前 `.splat4d` 的 delta-v1 body 主要是 `updateCount=0` 的静态占位).
 - 如果未来我们在 exporter 里真正生成非 0 的 update(让 SH 随时间变化),Unity 侧需要再补:
   - delta updates 的应用逻辑(按帧累积更新 labels,或在 GPU 上应用).
+
+---
+
+## 2026-02-22 15:39:40 +0800: `.sog4d` exporter(meta.json) 与 gsplat-unity 读者实现对齐修复
+
+### 现象
+- gsplat-unity 离线校验失败:
+  - `[sog4d][error] meta.json.format 非法: None`
+
+### 根因
+- `tools/exportor/export_sog4d.py` 写出的 meta.json:
+  - 缺少顶层 `format="sog4d"`.
+  - 把 float3 数组写成 `[[x,y,z], ...]`,而 Unity `JsonUtility` 解析 `Vector3` 需要 `{x,y,z}`.
+
+### 修复(已落地)
+- `tools/exportor/export_sog4d.py`:
+  - 补齐 `meta.format="sog4d"`.
+  - `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 输出改为 `[{"x":..,"y":..,"z":..}, ...]`.
+- `tools/exportor/spec.md`:
+  - 补齐上述 MUST 约束,避免未来再复发.

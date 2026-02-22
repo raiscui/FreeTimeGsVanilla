@@ -817,3 +817,59 @@
 
 ## 状态
 **目前在阶段1**: 将先创建一个备份分支,然后把 `00eb763` merge 进当前 `main`,最后做最小验证并推送到 `origin/main`.
+---
+
+# 任务计划: 修复 `export_sog4d.py` 输出的 meta.json 不符合 gsplat-unity 读者实现
+
+## 目标
+让 `tools/exportor/export_sog4d.py` 导出的 `.sog4d` 在 gsplat-unity(Unity 插件)中:
+- 离线 `validate` 通过.
+- Unity importer 能直接解析 `meta.json`,正常导入并播放.
+
+## 现象
+1) gsplat-unity 离线校验失败:
+- 报错: `[sog4d][error] meta.json.format 非法: None`
+2) Unity importer 解析 meta.json 失败或行为异常:
+- `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 使用 `[[x,y,z]]` 形式,
+  但 Unity `JsonUtility` 解析 `Vector3` 需要 `{x,y,z}` 形式.
+
+## 本质(根因)
+`export_sog4d.py` 生成的 `meta.json` 少了两项关键兼容约束:
+- 顶层缺少 `format="sog4d"`.
+- float3 数组(JSON)输出为 list-of-3,而不是 Vector3 的 object 形式.
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(推荐,从根源修正 exporter)
+- 修改 `export_sog4d.py`:
+  - 写入 `meta.format="sog4d"`.
+  - 把 `rangeMin/rangeMax/codebook` 统一输出为 `[{"x":..,"y":..,"z":..}, ...]`.
+- 同步更新 `tools/exportor/spec.md`,把 JSON 形态写清楚,避免再次复发.
+
+### 方向B: 先能用,后面再优雅(救火,但不能治本)
+- 继续允许 exporter 输出 legacy meta.json.
+- 依赖 gsplat-unity 的 `normalize-meta` 事后修复 `.sog4d`.
+- 代价: 团队会形成“先导出再修 meta”的隐性流程,容易漏掉.
+
+## 阶段
+- [x] 阶段1: 复现与证据确认
+- [x] 阶段2: 修复 exporter(meta.json format + Vector3 JSON)
+- [x] 阶段3: 同步更新规格文档(spec.md)
+- [x] 阶段4: 冒烟验证(compileall/help,可选: 真实 ckpt 导出)
+- [x] 阶段5: 回写四文件(WORKLOG/notes/ERRORFIX/LATER_PLANS)
+
+## 做出的决定
+- [2026-02-22 15:36:46 +0800] 选择方向A: 直接修 exporter 输出,并同步更新 spec.
+
+## 状态
+**目前在阶段5(等待 gsplat-unity 端到端确认)**
+- 时间: 2026-02-22 15:39:40 +0800
+- 已完成:
+  - `export_sog4d.py` 写入 `meta.format="sog4d"`.
+  - `rangeMin/rangeMax/scale.codebook` 改为 `{x,y,z}` 的 Vector3 JSON 形态.
+  - `tools/exportor/spec.md` 补齐 `meta.json.format` 与 float3 的 JSON 形态约束.
+  - 冒烟验证: `python3 -m py_compile tools/exportor/export_sog4d.py` + `python3 -m compileall -q tools/exportor`.
+- 待验证:
+  - 用修复后的 exporter 导出一份新的 `.sog4d`,确认 gsplat-unity:
+    - `validate` 直接通过.
+    - Unity importer 能直接导入,无需再跑 `normalize-meta`.

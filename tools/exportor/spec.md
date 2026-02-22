@@ -6,6 +6,13 @@
 
 ## Requirements
 
+### Requirement: `meta.json.format` MUST be `"sog4d"`
+为了让读者实现(gsplat-unity)能 fail-fast 识别 bundle 类型,`meta.json` 顶层 MUST 包含:
+- `format`: MUST 为 `"sog4d"`
+
+备注:
+- 早期 exporter 若缺少该字段,会导致离线 `validate` 失败,并阻塞 Unity importer.
+
 ### Requirement: Frame-to-frame splat identity MUST be stable
 系统 MUST 保证 frame-to-frame 的 splat identity 稳定,以支持逐帧 keyframe 插值.
 因此系统 MUST 满足以下恒等约束:
@@ -99,6 +106,10 @@
 - `hiPath`: 字符串模板,例如 `"frames/{frame}/position_hi.webp"`
 - `loPath`: 字符串模板,例如 `"frames/{frame}/position_lo.webp"`
 
+JSON 形态约定:
+- float3 MUST 序列化为 object 形态: `{"x": <float>, "y": <float>, "z": <float>}`
+- 原因: Unity `JsonUtility` 解析 `Vector3` 需要该形态,不能写成 `[[x,y,z], ...]` 的 list-of-3.
+
 并且每帧 MUST 存在两张 WebP 图:
 - `position_hi.webp`: 每个像素的 RGB 为 x,y,z 的高 8-bit
 - `position_lo.webp`: 每个像素的 RGB 为 x,y,z 的低 8-bit
@@ -116,6 +127,10 @@
 `streams.scale` MUST 包含:
 - `codebook`: float3 数组,每个元素表示一个候选 scale(对象空间)
 - `indicesPath`: 字符串模板,例如 `"frames/{frame}/scale_indices.webp"`
+
+JSON 形态约定:
+- `codebook` 内的 float3 MUST 序列化为 object 形态: `{"x": <float>, "y": <float>, "z": <float>}`
+- 原因同上(Unity `JsonUtility`).
 
 每帧 MUST 存在一张 `indicesPath` 指向的 WebP 图像作为 index map(例如 `scale_indices.webp`):
 - 每个像素的 RG 表示一个 u16 index(小端): `index = r + (g << 8)`
