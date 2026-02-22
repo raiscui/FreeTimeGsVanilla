@@ -793,9 +793,9 @@
 这样本地与 `origin/main` 不再分叉,后续可以正常 push/pull.
 
 ## 阶段
-- [ ] 阶段1: 计划和设置(确认分叉关系,做备份分支)
-- [ ] 阶段2: 执行合并(merge)并处理冲突(如有)
-- [ ] 阶段3: 验证与同步(最小检查 + 更新远端)
+- [x] 阶段1: 计划和设置(确认分叉关系,做备份分支)
+- [x] 阶段2: 执行合并(merge)并处理冲突(如有)
+- [x] 阶段3: 验证与同步(最小检查 + 更新远端)
 
 ## 现状诊断(事实)
 - 当前 `main` 与 `00eb763` 互不为祖先.
@@ -816,7 +816,15 @@
 - [2026-02-22 09:02:37 UTC] 选择方向A: merge.
 
 ## 状态
-**目前在阶段1**: 将先创建一个备份分支,然后把 `00eb763` merge 进当前 `main`,最后做最小验证并推送到 `origin/main`.
+**目前在阶段3**: 已完成合并并推送,分叉已消除.
+
+## 状态更新
+- [2026-02-22 09:10:07 UTC] 已完成:
+  - 备份分支: `backup/pre-merge-00eb763-20260222-0902`
+  - merge: `00eb763` -> `main`,并解决冲突(WORKLOG/notes/task_plan)
+  - merge commit: `6929ad7`
+  - 验证: `python3 -m compileall -q src datasets tools/exportor`
+  - push: `direnv exec . git push origin main`(远端 `origin/main` 已更新到 `6929ad7`)
 ---
 
 # 任务计划: 修复 `export_sog4d.py` 输出的 meta.json 不符合 gsplat-unity 读者实现
