@@ -250,3 +250,18 @@ python tools/exportor/export_splat4d.py \
   - merge commit: `6929ad7`
   - 状态记录 commit: `0b57500`
 - 已推送到 `origin/main`(使用 `direnv exec . git push ...` 读取 `.envrc.private` 凭据).
+
+## 2026-02-22 10:20:30 UTC
+- 修复 Unity 中 `.splat4d` 点云整体偏移/歪倒(训练 normalize 空间 vs COLMAP 原始空间不一致):
+  - `tools/exportor/export_splat4d.py` 新增:
+    - `--output-space train|colmap`(默认 train)
+    - `--colmap-dir <sparse/0>`(当 output-space=colmap 时必填)
+  - 导出时复现训练侧 `colmap->train` transform,并对 `(position, velocity, scale, rotation)` 统一应用 `T^{-1}` 导出回 COLMAP 原始空间.
+  - `.splat4d v2` 额外写入 `XFRM` section(64B,16xf32)记录 `colmap->train` transform,用于离线 debug(不影响现有 importer).
+- 重新导出(用于 Unity 实测):
+  - 输入 ckpt: `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+  - 输出: `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f16_colmap.splat4d`
+  - 验证: magic=`SPL4DV02`,section table 含 `XFRM`.
+- 文档同步:
+  - `README.md` 增加 Unity/COLMAP 坐标对齐说明与示例命令.
+  - `tools/exportor/FreeTimeGsCheckpointToSog4D.md` 补齐新参数说明.

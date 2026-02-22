@@ -63,10 +63,18 @@ import math
 import struct
 import sys
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import torch
+
+# 让脚本以 `python tools/exportor/export_splat4d.py ...` 方式运行时,
+# 也能稳定 import 本仓库根目录下的模块(例如 `datasets.*`).
+# 备注: 当以模块方式运行时(例如 `python -m tools.exportor.export_splat4d`),也不会有副作用.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 SH_C0: float = 0.28209479177387814
@@ -97,6 +105,7 @@ _SECT_META: int = _fourcc("META")
 _SECT_SHCT: int = _fourcc("SHCT")  # SH centroids
 _SECT_SHLB: int = _fourcc("SHLB")  # SH base labels(u16[N])
 _SECT_SHDL: int = _fourcc("SHDL")  # SH delta(labelDeltaV1)
+_SECT_XFRM: int = _fourcc("XFRM")  # 可选: 训练归一化 transform(4x4 f32),用于离线 debug
 
 
 def _centroids_type_code(centroids_type: Literal["f16", "f32"]) -> int:
@@ -416,6 +425,228 @@ def _as_numpy_f32(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().to(dtype=torch.float32).numpy()
 
 
+def _rotmat_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
+    """
+    把 3x3 旋转矩阵转成 quaternion(w,x,y,z).
+
+    说明:
+    - 这里的 quaternion 仅用于“全局坐标系旋转”叠乘到每个 Gaussian 的 rotation 上.
+    - 训练归一化 transform 是 similarity(统一缩放 + 旋转 + 平移),其中旋转部分可以安全用 quaternion 表达.
+    """
+    R = np.asarray(R, dtype=np.float64)
+    if R.shape != (3, 3):
+        raise ValueError(f"R must be 3x3, got shape={R.shape}")
+
+    trace = float(R[0, 0] + R[1, 1] + R[2, 2])
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = math.sqrt(max(0.0, 1.0 + float(R[0, 0] - R[1, 1] - R[2, 2]))) * 2.0
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = math.sqrt(max(0.0, 1.0 + float(R[1, 1] - R[0, 0] - R[2, 2]))) * 2.0
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = math.sqrt(max(0.0, 1.0 + float(R[2, 2] - R[0, 0] - R[1, 1]))) * 2.0
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+
+    q = np.array([w, x, y, z], dtype=np.float32)
+    q = _normalize_quat_wxyz(q.reshape(1, 4)).reshape(4)
+    return q
+
+
+def _quat_mul_wxyz(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    quaternion 乘法(wxyz),用于旋转叠乘.
+
+    约定:
+    - out = a * b
+    - 旋转矩阵满足: R(out) = R(a) @ R(b)
+      等价于: 先应用 b,再应用 a.
+    """
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    if a.shape[-1] != 4 or b.shape[-1] != 4:
+        raise ValueError(f"quat must end with 4 dims, got a={a.shape}, b={b.shape}")
+
+    aw, ax, ay, az = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bw, bx, by, bz = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+    w = aw * bw - ax * bx - ay * by - az * bz
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by - ax * bz + ay * bw + az * bx
+    z = aw * bz + ax * by - ay * bx + az * bw
+    return np.stack([w, x, y, z], axis=-1).astype(np.float32)
+
+
+def _decompose_similarity_transform(T: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+    """
+    把 4x4 的 similarity transform 分解成:
+    - scale: 统一缩放 s
+    - rot: 旋转矩阵 R(3x3)
+    - trans: 平移 t(3,)
+
+    约束(与训练代码一致):
+    - 训练时 normalize=True 的 transform 是 (similarity_from_cameras + PCA 对齐) 的组合.
+    - 线性部分应满足 A ≈ s * R,且 s>0,det(R)=+1.
+    """
+    T = np.asarray(T, dtype=np.float64)
+    if T.shape != (4, 4):
+        raise ValueError(f"T must be 4x4, got shape={T.shape}")
+
+    A = T[:3, :3]
+    detA = float(np.linalg.det(A))
+    if not np.isfinite(detA) or detA <= 0.0:
+        raise ValueError(f"invalid similarity transform: det(A)={detA}")
+
+    scale = float(np.cbrt(detA))
+    R_approx = A / scale
+    U, _, Vt = np.linalg.svd(R_approx)
+    R = U @ Vt
+    if float(np.linalg.det(R)) < 0.0:
+        # 修正 SVD 可能产生的 reflection,保持 det=+1.
+        U[:, -1] *= -1.0
+        R = U @ Vt
+
+    trans = T[:3, 3]
+    return float(scale), R.astype(np.float32), trans.astype(np.float32)
+
+
+def _compute_colmap_to_train_transform(*, colmap_dir: Path) -> np.ndarray:
+    """
+    复现训练时 `FreeTimeParser(normalize=True)` 的坐标归一化 transform.
+
+    训练侧的含义:
+    - p_train = T @ p_colmap
+    - 其中 T = T2 @ T1
+      - T1: similarity_from_cameras(以相机中心做平移+统一缩放)
+      - T2: align_principle_axes(对点云做 PCA 对齐)
+
+    这里我们用 COLMAP sparse 模型(cameras/images/points3D)重建同一个 T,
+    让 exporter 能把 ckpt 的训练坐标反变换回 COLMAP 原始空间.
+    """
+    # 备注: 这里用 lazy import,避免用户只导出 train 空间时引入额外依赖/耗时.
+    from datasets.normalize import (
+        align_principle_axes,
+        similarity_from_cameras,
+        transform_cameras,
+        transform_points,
+    )
+    from datasets.read_write_model import read_model
+
+    colmap_dir = Path(colmap_dir)
+    if not colmap_dir.exists():
+        raise FileNotFoundError(f"colmap_dir not found: {colmap_dir}")
+
+    cameras, images, points3D = read_model(str(colmap_dir), ext="")
+    if images is None or points3D is None:
+        raise RuntimeError(f"failed to read COLMAP model from: {colmap_dir}")
+    if len(images) == 0:
+        raise ValueError(f"COLMAP images is empty: {colmap_dir}")
+    if len(points3D) == 0:
+        raise ValueError(f"COLMAP points3D is empty: {colmap_dir}")
+
+    # 1) 构建 camtoworlds: inverse(w2c),与训练代码一致.
+    w2c_mats: List[np.ndarray] = []
+    bottom = np.array([0, 0, 0, 1], dtype=np.float32).reshape(1, 4)
+    for im in images.values():
+        R = im.qvec2rotmat().astype(np.float32, copy=False)
+        t = np.asarray(im.tvec, dtype=np.float32).reshape(3, 1)
+        w2c = np.concatenate([np.concatenate([R, t], axis=1), bottom], axis=0)
+        w2c_mats.append(w2c)
+
+    w2c = np.stack(w2c_mats, axis=0).astype(np.float32)
+    camtoworlds = np.linalg.inv(w2c).astype(np.float32)
+
+    # 2) points3D xyz
+    points = np.stack([p.xyz for p in points3D.values()], axis=0).astype(np.float32)
+
+    # 3) 复现 normalize=True 的 transform
+    T1 = similarity_from_cameras(camtoworlds)
+    camtoworlds = transform_cameras(T1, camtoworlds)
+    points = transform_points(T1, points)
+
+    T2 = align_principle_axes(points)
+    camtoworlds = transform_cameras(T2, camtoworlds)
+    points = transform_points(T2, points)
+
+    transform = (T2 @ T1).astype(np.float32)
+
+    # 小 sanity: 相机中心应该被移到 0 附近,避免用户拿错 colmap_dir 导致“越变越歪”.
+    cam_centers = camtoworlds[:, :3, 3]
+    cam_mean = cam_centers.mean(axis=0)
+    if float(np.linalg.norm(cam_mean)) > 1e-3:
+        print(
+            f"[splat4d][warn] normalized camera center mean is not ~0: mean={cam_mean.tolist()} (colmap_dir={colmap_dir})"
+        )
+
+    return transform
+
+
+@dataclass(frozen=True)
+class _SpaceTransform:
+    """
+    把 ckpt(训练 normalized 空间)的 Gaussian 反变换回某个目标空间.
+
+    约定:
+    - 对 position: out = (in - sub_trans) @ linear_T
+    - 对 velocity: out = in @ linear_T
+    - 对 scale: out = in * scale_mult
+    - 对 rotation(quat): out = quat_left * in
+    """
+
+    sub_trans: np.ndarray  # [3] float32,先做 in - sub_trans
+    linear_T: np.ndarray  # [3,3] float32,行向量右乘矩阵
+    scale_mult: float  # float,统一尺度因子(仅用于 scales)
+    quat_left: np.ndarray  # [4] float32,全局旋转 quaternion(wxyz)
+    colmap_to_train: np.ndarray  # [4,4] float32,训练归一化 transform(用于写 XFRM section)
+
+
+def _build_train_to_colmap_transform(*, colmap_to_train: np.ndarray) -> _SpaceTransform:
+    """
+    从训练归一化 transform(T: colmap->train)推导出 train->colmap 的反变换参数.
+
+    这样导出 `.splat4d` 时,可以把 ckpt 里的位置/速度/尺度/旋转统一对齐到 COLMAP 原始空间.
+    """
+    scale, rot, trans = _decompose_similarity_transform(colmap_to_train)
+    inv_scale = 1.0 / float(scale)
+
+    # train->colmap:
+    # p_colmap = (1/s) * R^T * (p_train - t)
+    # 行向量实现: (p_train - t) @ ((1/s)*R^T)^T = (p_train - t) @ ((1/s)*R)
+    linear_T = (inv_scale * rot).astype(np.float32)
+
+    # quat: R_colmap = R^T @ R_train
+    quat_left = _rotmat_to_quat_wxyz(rot.T)
+
+    print(
+        "[splat4d] output_space=colmap: apply train->colmap inverse normalize transform\n"
+        f"  - inv_scale={inv_scale:.9f}\n"
+        f"  - sub_trans(train)={trans.tolist()}\n"
+        f"  - rot_det={float(np.linalg.det(rot)):.6f}"
+    )
+
+    return _SpaceTransform(
+        sub_trans=trans.astype(np.float32, copy=False),
+        linear_T=linear_T,
+        scale_mult=float(inv_scale),
+        quat_left=quat_left.astype(np.float32, copy=False),
+        colmap_to_train=np.asarray(colmap_to_train, dtype=np.float32),
+    )
+
+
 def export_splat4d_from_ckpt(
     *,
     ckpt_path: Path,
@@ -436,6 +667,8 @@ def export_splat4d_from_ckpt(
     shn_assign_chunk: int,
     shn_kmeans_iters: int,
     seed: int,
+    output_space: Literal["train", "colmap"] = "train",
+    colmap_dir: Optional[Path] = None,
 ) -> None:
     # `splat4d_version` 控制 time/duration 的语义(window vs gaussian),
     # `splat4d_format_version` 控制文件是否带 header(legacy vs header+sections).
@@ -553,6 +786,19 @@ def export_splat4d_from_ckpt(
     print(f"[splat4d] sigma(exp(duration)) range: [{sigmas_np.min():.6f}, {sigmas_np.max():.6f}]")
 
     # -----------------------------
+    # 输出坐标空间: train(normalized) vs colmap(original)
+    # -----------------------------
+    if output_space not in ("train", "colmap"):
+        raise ValueError("--output-space must be 'train' or 'colmap'")
+
+    space_xform: Optional[_SpaceTransform] = None
+    if output_space == "colmap":
+        if colmap_dir is None:
+            raise ValueError("--colmap-dir is required when --output-space=colmap")
+        colmap_to_train = _compute_colmap_to_train_transform(colmap_dir=Path(colmap_dir))
+        space_xform = _build_train_to_colmap_transform(colmap_to_train=colmap_to_train)
+
+    # -----------------------------
     # format v1: legacy,仅写 record 数组
     # -----------------------------
     if int(splat4d_format_version) == 1:
@@ -596,6 +842,15 @@ def export_splat4d_from_ckpt(
 
                 scales_lin = np.exp(_as_numpy_f32(scales_log[start:end]))  # [n,3]
                 q_norm = _normalize_quat_wxyz(_as_numpy_f32(quats[start:end]))  # [n,4]
+
+                # 坐标空间对齐(可选): 把 ckpt 的训练坐标反变换回 COLMAP 原始空间.
+                if space_xform is not None:
+                    pos0 = (pos0 - space_xform.sub_trans) @ space_xform.linear_T
+                    vel_np = vel_np @ space_xform.linear_T
+                    scales_lin = scales_lin * np.float32(space_xform.scale_mult)
+                    q_norm = _quat_mul_wxyz(space_xform.quat_left, q_norm)
+                    q_norm = _normalize_quat_wxyz(q_norm)
+
                 q8 = _quantize_quat_to_u8(q_norm)  # [n,4]
 
                 f_dc = _as_numpy_f32(sh0[start:end]).reshape(n, 3)
@@ -743,6 +998,15 @@ def export_splat4d_from_ckpt(
 
             scales_lin = np.exp(_as_numpy_f32(scales_log[start:end]))  # [n,3]
             q_norm = _normalize_quat_wxyz(_as_numpy_f32(quats[start:end]))  # [n,4]
+
+            # 坐标空间对齐(可选): 把 ckpt 的训练坐标反变换回 COLMAP 原始空间.
+            if space_xform is not None:
+                pos0 = (pos0 - space_xform.sub_trans) @ space_xform.linear_T
+                vel_np = vel_np @ space_xform.linear_T
+                scales_lin = scales_lin * np.float32(space_xform.scale_mult)
+                q_norm = _quat_mul_wxyz(space_xform.quat_left, q_norm)
+                q_norm = _normalize_quat_wxyz(q_norm)
+
             q8 = _quantize_quat_to_u8(q_norm)  # [n,4]
 
             f_dc = _as_numpy_f32(sh0[start:end]).reshape(n, 3)
@@ -813,6 +1077,17 @@ def export_splat4d_from_ckpt(
             raise RuntimeError(f"internal error: meta_bytes size={len(meta_bytes)}, expected 64")
         f.write(meta_bytes)
         sections.append((_SECT_META, 0, 0, 0, int(meta_offset), int(len(meta_bytes))))
+
+        # ---- XFRM(可选) ----
+        # 当我们导出到 colmap(original)空间时,把训练用的 colmap->train 归一化矩阵写进文件,
+        # 便于离线工具或未来 importer 做一致性校验.
+        if space_xform is not None:
+            xfrm_offset = int(f.tell())
+            xfrm_bytes = space_xform.colmap_to_train.astype("<f4", copy=False).tobytes(order="C")
+            if len(xfrm_bytes) != 64:
+                raise RuntimeError(f"internal error: xfrm_bytes size={len(xfrm_bytes)}, expected 64")
+            f.write(xfrm_bytes)
+            sections.append((_SECT_XFRM, 0, 0, 0, int(xfrm_offset), int(len(xfrm_bytes))))
 
         # ---- SH sections ----
         if sh_bands > 0:
@@ -933,6 +1208,23 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--ckpt", type=Path, required=True, help="Path to ckpt_*.pt")
     parser.add_argument("--output", type=Path, required=True, help="Output .splat4d path")
     parser.add_argument(
+        "--output-space",
+        type=str,
+        default="train",
+        choices=["train", "colmap"],
+        help=(
+            "输出坐标空间: "
+            "train=直接写 ckpt 的训练 normalized 坐标; "
+            "colmap=把训练坐标反变换回 COLMAP 原始空间(需要 --colmap-dir)."
+        ),
+    )
+    parser.add_argument(
+        "--colmap-dir",
+        type=Path,
+        default=None,
+        help="COLMAP sparse 模型目录(包含 cameras/images/points3D).当 --output-space=colmap 时必填.",
+    )
+    parser.add_argument(
         "--splat4d-format-version",
         type=int,
         default=0,
@@ -1046,6 +1338,8 @@ def main(argv: list[str]) -> int:
         shn_assign_chunk=int(args.shn_assign_chunk),
         shn_kmeans_iters=int(args.shn_kmeans_iters),
         seed=int(args.seed),
+        output_space=str(args.output_space),  # type: ignore[arg-type]
+        colmap_dir=args.colmap_dir,
     )
     return 0
 

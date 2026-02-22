@@ -881,3 +881,84 @@
   - 用修复后的 exporter 导出一份新的 `.sog4d`,确认 gsplat-unity:
     - `validate` 直接通过.
     - Unity importer 能直接导入,无需再跑 `normalize-meta`.
+
+
+# 任务计划: 修复 Unity 中点云坐标偏移/旋转(导出坐标系对齐)
+
+## 目标
+在 Unity 导入 `.splat4d` 后:
+- 高斯点云的世界坐标不再出现整体偏移/歪倒.
+- 若同时导入原始 COLMAP 相机位姿,两者能对齐到同一坐标系.
+
+## 阶段
+- [x] 阶段1: 现象复盘与假设
+- [x] 阶段2: 证据收集(统计/对比)
+- [x] 阶段3: 实现导出坐标变换
+- [x] 阶段4: 重新导出并验证
+- [x] 阶段5: 文档与记录回写
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(本次选用,一次修正,长期稳定)
+- 在 exporter 中复现训练时的 normalize transform(由 COLMAP 的 cameras+points 得到 `T = T2@T1`).
+- 提供 `--output-space colmap`:
+  - 把 ckpt(训练 normalized 空间)里的 `(position, velocity, scale, rotation)` 统一做 `T^{-1}` 变换,导出回 COLMAP 原始空间.
+  - 这样 Unity 侧如果使用原始 COLMAP 相机位姿,就能直接对齐.
+- 可选: 写入一个额外的 v2 section(例如 `XFRM`)记录 `T` 及导出空间,用于离线 debug(不影响现有 importer).
+
+### 方向B: 先能用,后面再优雅(不推荐,靠手调)
+- 不改 exporter,在 Unity 里对导入对象手动旋转/平移/缩放对齐.
+- 缺点:
+  - 每个场景都要手工调,不可复用.
+  - 误差难定位,也无法写成自动化验证.
+
+## 关键问题
+1. 本仓库训练代码 `FreeTimeParser(normalize=True)` 会对 COLMAP 做 similarity(中心+缩放) + PCA 对齐,ckpt 坐标天然是 normalized 空间.
+2. Unity 侧若使用原始 COLMAP 坐标(例如相机位姿/点云参考),会与 ckpt normalized 空间出现整体旋转/平移/尺度不一致.
+3. 目前 `tools/exportor/export_splat4d.py` 直接写 ckpt 的 `means/velocities/...`,没有提供导出回 COLMAP 空间的能力.
+
+## 做出的决定
+- [2026-02-22 10:05:00 UTC] 选择方向A: 在 `export_splat4d.py` 增加 `--output-space colmap` + `--colmap-dir`,并重新导出 `ckpt_29999.pt` 做 Unity 验证.
+
+## 状态
+**目前在阶段5(已完成)**:
+- exporter 已支持 `--output-space colmap --colmap-dir ...`,并会把 `(position, velocity, scale, rotation)` 统一应用 `T^{-1}` 导出回 COLMAP 原始空间.
+- 已重新导出可用于 Unity 的产物:
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f16_colmap.splat4d`
+  - v2 section table 含 `XFRM`(记录 `colmap->train` transform,便于离线 debug)
+- 文档已同步: `README.md` 与 `tools/exportor/FreeTimeGsCheckpointToSog4D.md`.
+
+
+# 任务计划: `.splat4d` delta-v1 真实 updates + Unity 运行时应用(GPU compute scatter)
+
+## 目标
+把当前 `.splat4d format v2` 的 delta-v1 从“占位(updateCount=0)”升级为“真实 updates”,并在 Unity 运行时按 `TimeNormalized` 选帧真正应用这些 deltas,用 GPU compute scatter 更新 `_SHBuffer`.
+
+## 阶段
+- [ ] 阶段1: 计划和设置(OpenSpec change)
+- [ ] 阶段2: 规格与任务拆解(Artifacts)
+- [ ] 阶段3: 实现(Exporter+Unity)
+- [ ] 阶段4: 验证与交付(自检+测试+记录)
+
+## 方案方向(至少二选一)
+
+### 方向A: 不惜代价,最佳方案(本次选用,可扩展)
+- Unity 运行时用 GPU compute scatter 应用 delta updates,只在帧变化时 dispatch.
+- 优点: updates 大时更可扩展,并且 update entry 是稀疏列表,天然适合 GPU 散写.
+- 代价: 需要新增 compute shader,并在 `GsplatRenderer` 做 buffer 生命周期与 dispatch 管理.
+
+### 方向B: 先能用,后面再优雅(兜底)
+- Unity 运行时用 CPU 解析 deltas,再用 `GraphicsBuffer.SetData` 做局部更新.
+- 优点: 不依赖 compute shader,实现更快.
+- 缺点: update 条目多且 splatId 离散时,会退化成大量小的 `SetData`,性能不可控.
+
+## 关键问题
+1. exporter 必须支持动态 `splats["shN"]`(shape 4D),才能产生非 0 delta updates;但目前真实 ckpt 的 `shN` 仍是静态 3D,因此需要合成动态 ckpt 做可重复验证.
+2. `.splat4d v2` 当前 SHLB 的“全段复用同一份 base labels blob”策略会阻塞真实 delta(因为 segment base labels 可能不同),需要改为“每 segment 一份 base labels”.
+3. Unity importer 目前只用 `startFrame=0` 的 base labels,不会应用后续帧 deltas;需要补齐 delta 段的资产承载与运行时应用逻辑.
+
+## 做出的决定
+- [2026-02-22 13:24:02 UTC] 先输出 OpenSpec change(本次你明确要求),把 scope/非目标/验收标准固定下来,再进入实现阶段,避免实现过程中反复改口径.
+
+## 状态
+**目前在阶段1**: 正在创建 OpenSpec change scaffold,并将你的完整实现计划固化为 artifacts(便于后续按 tasks 逐条落地).

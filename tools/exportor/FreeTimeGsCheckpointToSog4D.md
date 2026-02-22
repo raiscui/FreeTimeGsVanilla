@@ -405,6 +405,8 @@ SH rest(v1/v2,由 `--sh-version` 控制):
 基础:
 - `--ckpt`
 - `--output`
+- `--output-space train|colmap`(默认 train)
+- `--colmap-dir`(当 output-space=colmap 时必填,指向 `sparse/0` 这类目录)
 - `--base-opacity-threshold`
 - `--chunk-size`
 - `--min-sigma`

@@ -546,3 +546,39 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
   - `streams.position.rangeMin/rangeMax` 与 `streams.scale.codebook` 输出改为 `[{"x":..,"y":..,"z":..}, ...]`.
 - `tools/exportor/spec.md`:
   - 补齐上述 MUST 约束,避免未来再复发.
+
+---
+
+## 2026-02-22 10:25:00 UTC: Unity 中点云偏移/歪倒(训练 normalize 空间 vs COLMAP 原始空间)
+
+### 现象
+- Unity 中导入 `.splat4d` 后:
+  - 高斯点云整体偏移.
+  - 三轴旋转也不符合预期,看起来像"歪倒".
+  - 与原始 COLMAP 相机视角/重心轴线不一致.
+
+### 根因(坐标空间不一致)
+- 训练侧使用 `FreeTimeParser(normalize=True)`:
+  - 会对 COLMAP 原始空间应用归一化 transform `T = T2@T1`(相机中心缩放 + PCA 对齐).
+  - ckpt 中的 `means/velocities/scales/quats` 都处于 "train normalized 空间".
+- Unity 的 `.splat4d` importer 不做坐标轴/归一化的隐式翻转与反变换.
+  - 因此当 Unity 侧拿 "原始 COLMAP 相机位姿/坐标" 做参考时,会出现整体错位.
+
+### 修复(已落地到 exporter)
+- `tools/exportor/export_splat4d.py` 新增:
+  - `--output-space train|colmap`(默认 train).
+  - `--colmap-dir <sparse/0>`:
+    - 读取 COLMAP 的 `cameras/images/points3D`.
+    - 复现训练侧的 `colmap->train` 归一化 transform.
+    - 对导出 record 的 `(position, velocity, scale, rotation)` 统一应用 `T^{-1}`,把训练坐标反变换回 COLMAP 原始空间.
+  - v2 文件额外写入 `XFRM` section(64B,16xf32):
+    - 保存 `colmap->train` transform,用于离线 debug/一致性校验(不影响现有 importer).
+
+### 端到端验证(本机导出产物)
+- 输入 ckpt:
+  - `results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt`
+- 输出(新增 colmap 空间版本):
+  - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f16_colmap.splat4d`
+- header/sections:
+  - magic=`SPL4DV02`
+  - section table 包含 `XFRM`

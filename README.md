@@ -390,6 +390,26 @@ python tools/exportor/export_splat4d.py \
   --delta-segment-length 50
 ```
 
+Unity/COLMAP 坐标对齐(可选,推荐用于"相机位姿+点云"一起导入的工作流):
+- 训练代码使用 `FreeTimeParser(normalize=True)`,会对 COLMAP 做归一化(transform=相机中心缩放+PCA 对齐).
+  因此 ckpt 里的坐标天然是 "train normalized 空间".
+- 如果你在 Unity 里还会导入"原始 COLMAP 相机位姿"(或拿它做参考),建议导出时把坐标反变换回 COLMAP 原始空间:
+```bash
+source .venv/bin/activate
+python tools/exportor/export_splat4d.py \
+  --ckpt /path/to/ckpt_29999.pt \
+  --output /path/to/out_v2_sh3_colmap.splat4d \
+  --splat4d-version 2 \
+  --sh-bands 3 \
+  --frame-count 61 \
+  --delta-segment-length 50 \
+  --output-space colmap \
+  --colmap-dir /path/to/colmap/sparse/0
+```
+备注:
+- `--output-space` 只影响 `(position, velocity, scale, rotation)` 的坐标系.
+  `time/duration` 的语义不变.
+
 ## 4D Viewer
 
 An interactive viewer for visualizing trained 4D Gaussian Splatting models with temporal animation.
