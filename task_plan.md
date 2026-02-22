@@ -750,3 +750,37 @@
 
 ## 状态
 **目前在阶段5**: 已完成高质量 `.splat4d format v2` 导出与验证(确认 magic=`SPL4DV02`),并回写记录.
+
+
+# 任务计划: 同步更新 `gsplat-unity` 的 `.splat4d v2` importer(Per-band SH + deltaSegments)
+
+## 目标
+确认并在必要时更新关联项目 `/workspace/gsplat-unity`,让 Unity 侧 importer 能正确解析本仓库导出的 `.splat4d format v2` 扩展能力:
+- per-band SH rest codebooks(`sh1/sh2/sh3`)
+- 可配置的 delta segment length(`deltaSegments`,labelsEncoding=delta-v1)
+
+## 阶段
+- [x] 阶段1: 计划和设置
+- [x] 阶段2: 现状盘点(读取 importer/运行时渲染代码)
+- [x] 阶段3: 设计对齐(明确 v2 header/sections 的解析口径)
+- [x] 阶段4: 实现与集成(必要时改 importer + asset 数据结构)
+- [x] 阶段5: 验证(代码级校验: 解析路径覆盖 SHCT/SHLB/SHDL + TimeModel)
+- [x] 阶段6: 回写记录(WORKLOG/notes/LATER_PLANS/ERRORFIX)
+
+## 关键问题
+1. `gsplat-unity` 当前是否仅支持:
+   - legacy `.splat4d`(无 header,64B/record)
+   - `.splat4d format v2` 但只读取 RECS,不读取 SH sections?
+2. `gsplat-unity` 的 SH 管线是否已经具备 per-band SH rest 的数据结构(例如 codebook+labels+deltaSegments)?
+3. `delta-v1` 在 Unity 侧是否已实现:
+   - 解析 segment header + per-frame updateCount
+   - 即使 updateCount=0 也能稳定工作
+4. 如果 Unity 侧暂不支持 SH rest,我们是:
+   - A: 先做“忽略 SH rest sections,仍能正确导入并渲染 SH0”(保证可用)
+   - B: 一步到位支持 per-band SH rest(质量更好)
+
+## 做出的决定
+- [2026-02-22 07:07:14 UTC] 先做阶段2 现状盘点: 直接读取 `/workspace/gsplat-unity` 的 importer/运行时解析代码,用代码事实判断是否需要改动.
+
+## 状态
+**目前在阶段6**: 已完成现状盘点.结论是 `gsplat-unity` 已实现 `.splat4d format v2` 的 per-band SH rest 解码,并支持 deltaSegments(校验段覆盖与 delta header).当前无需额外改动即可导入本仓库输出.

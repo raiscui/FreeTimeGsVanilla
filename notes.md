@@ -499,3 +499,30 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
 - 这份文件用于验证 Unity 侧的 v2 importer 是否已完整支持:
   - header v2 + timeModel=2(gaussian)
   - per-band SH centroids + base labels + delta-v1 blocks
+
+## 2026-02-22 07:10:28 UTC 追加: `gsplat-unity` 是否需要同步更新(per-band SH rest + deltaSegments)
+
+### 结论
+- `/workspace/gsplat-unity` 已经实现了 `.splat4d format v2` 的:
+  - per-band SH rest codebooks(`SHCT`)+labels(`SHLB`)解码到 `GsplatAsset.SHs`
+  - delta-v1 的 segment 覆盖性校验与 delta header 校验(`SHDL`)
+- 因此,以当前 FreeTimeGsVanilla exporter 的输出(我们现在 delta-v1 默认 `updateCount=0`)来看,`gsplat-unity` 不需要额外改动就能正确导入并渲染(至少在 importer 逻辑层面已经对齐).
+
+### 证据(关键文件与关键引述)
+- importer 文件: `/workspace/gsplat-unity/Editor/GsplatSplat4DImporter.cs`
+  - v2 header/sections 常量:
+    - `static readonly byte[] k_magicV2 = ... "SPL4DV02"`(用于区分 v1/v2)
+    - section kinds: `RECS/META/SHCT/SHLB/SHDL`
+  - 直接引述(原文,用于说明范围):
+    - "v2: header + section table,用于承载 SH rest 与更准确的时间核语义." (文件内 v2 说明注释)
+    - "5) SH rest(per-band)解码(可选)" (v2 import 流程第 5 步)
+  - 解码入口:
+    - 当 `header.shBands > 0` 时调用 `TryDecodeShBandsFromV2(...)` 去读取 `SHCT/SHLB/SHDL`.
+
+### 兼容性备注(重要,避免未来踩坑)
+- 当前 `GsplatSplat4DImporter.cs` 对 `labelsEncoding=delta-v1` 的处理策略是:
+  - 会校验 segments 必须连续覆盖 `[0,frameCount)` 并校验 delta header.
+  - 但实际解码时只取 `startFrame=0` 的 base labels(`SHLB`)来重建 SH rest,不会应用后续帧的 delta updates.
+- 这和我们当前 exporter 的默认实现是匹配的(目前 `.splat4d` 的 delta-v1 body 主要是 `updateCount=0` 的静态占位).
+- 如果未来我们在 exporter 里真正生成非 0 的 update(让 SH 随时间变化),Unity 侧需要再补:
+  - delta updates 的应用逻辑(按帧累积更新 labels,或在 GPU 上应用).

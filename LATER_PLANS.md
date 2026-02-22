@@ -31,3 +31,9 @@
 - DualGS 的两条“二期压缩路线”(对齐低端设备/超长序列)可以作为后续迭代方向:
   - SH change events: 用 quadruples `(t,d,i,k)` + sort + length encoding 代替 per-frame block,可作为 delta-v2.
   - Motion: R-VQ + "temporal quantization(11-bit in our setting)" + RANS(lossless),可考虑给 `.splat4d format v2` 增加可选的 motion 压缩 section.
+
+## 2026-02-22 07:10:28 UTC
+- 如果后续要让 `.splat4d` 的 SH 真正随时间变化(导出 delta-v1 的非 0 updateCount,或实现 delta-v2 event stream):
+  - FreeTimeGsVanilla exporter 侧需要生成真实 updates.
+  - `/workspace/gsplat-unity` 侧需要补齐 delta updates 的应用逻辑.
+    - 当前 `Editor/GsplatSplat4DImporter.cs` 对 delta-v1 会做 segment 覆盖性与 header 校验,但解码时只使用 startFrame=0 的 base labels,不会应用后续帧 deltas.

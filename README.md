@@ -21,7 +21,7 @@ A vanilla minimal implementation of **FreeTimeGS** built on [gsplat](https://git
 - **Keyframe Processing** - Smart sampling for large video sequences
 
 
-**Based on the paper:** 
+**Based on the paper:**
 *FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere for Dynamic Scene Reconstruction* Yifan Wang, Peishan Yang, Zhen Xu, Jiaming Sun, Zhanhua Zhang, Yong Chen, Hujun Bao, Sida Peng, Xiaowei Zhou **CVPR 2025** [[Paper]](https://openaccess.thecvf.com/content/CVPR2025/papers/Wang_FreeTimeGS_Free_Gaussian_Primitives_at_Anytime_Anywhere_for_Dynamic_Scene_CVPR_2025_paper.pdf) [[Project Page]](https://zju3dv.github.io/freetimegs/)
 
 
@@ -418,7 +418,7 @@ python -c "import viser; import nerfview; import gsplat; print('All dependencies
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/viewer_4d.py \
-    --ckpt /path/to/results/ckpts/ckpt_29999.pt \
+    --ckpt results/bar_release_full/out_0_61/ckpts/ckpt_29999.pt \
     --port 8080 \
     --total-frames 60 \
     --temporal-threshold 0.05 \

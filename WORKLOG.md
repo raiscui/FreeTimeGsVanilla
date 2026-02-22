@@ -222,3 +222,11 @@ python tools/exportor/export_splat4d.py \
     - `--shn-count 512 --shn-centroids-type f16 --shn-codebook-sample 200000`
   - 快速验证:
     - 读取文件前 8 bytes 为 `SPL4DV02`
+
+## 2026-02-22 07:10:28 UTC
+- 对齐关联项目 `/workspace/gsplat-unity` 的 importer 能力,确认是否需要同步改动以支持:
+  - `.splat4d format v2` 的 per-band SH rest codebooks
+  - 可配置的 delta segment length(delta-v1 segments)
+- 结论: 当前 `gsplat-unity` 已经实现相关解析/解码逻辑,无需额外改动即可消费本仓库导出的 `.splat4d v2`:
+  - `Editor/GsplatSplat4DImporter.cs` 支持 `SPL4DV02` header+sections,并读取 `SHCT/SHLB/SHDL` 解码到 `GsplatAsset.SHs`.
+  - 对 `labelsEncoding=delta-v1` 会校验 segments 覆盖性与 delta header(当前 exporter 默认 `updateCount=0`,因此仅用 base labels 也能得到正确结果).
