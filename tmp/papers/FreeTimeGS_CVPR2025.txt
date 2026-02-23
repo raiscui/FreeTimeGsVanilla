@@ -1,0 +1,644 @@
+                         This CVPR paper is the Open Access version, provided by the Computer Vision Foundation.
+                                      Except for this watermark, it is identical to the accepted version;
+                                the final published version of the proceedings is available on IEEE Xplore.
+
+
+
+
+                FreeTimeGS: Free Gaussian Primitives at Anytime Anywhere
+                           for Dynamic Scene Reconstruction
+
+              Yifan Wang1* Peishan Yang1* Zhen Xu1* Jiaming Sun1 Zhanhua Zhang2
+                                                                     †
+                       Yong Chen2 Hujun Bao1 Sida Peng1 Xiaowei Zhou1
+                          1                                      2
+                              Zhejiang University                    Geely Automobile Research Institute
+
+
+
+
+                                         Ours       Full: 27.41 dB             STGS Full: 24.97 dB            4DGS Full: 25.98 dB
+      Ground Truth
+                                        467 FPS     Dyn: 29.38 dB              142 FPS Dyn: 25.32 dB          65 FPS Dyn: 26.75 dB
+
+
+Figure 1. Photorealistic and real-time rendering of dynamic 3D scenes. Our method achieves the best performance on challenging
+dynamic scenes with fast and complex motion. Compared with current state-of-the-art methods 4DGS [48] and STGS [21], our PSNR is
+improved by 2.4dB and 1.4dB on the SelfCap dataset. For dynamic regions, our PSNR is improved by 4.1dB and 2.6dB. What’s more, our
+method supports real-time rendering at 1080p resolution with a speed of 450 FPS using a single RTX 4090 GPU.
+
+                              Abstract                                      1. Introduction
+                                                                            Dynamic view synthesis aims to produce novel views of a
+    This paper addresses the challenge of reconstructing dy-
+                                                                            dynamic 3D scene from captured multi-view videos, which
+namic 3D scenes with complex motions. Some recent works
+                                                                            has a wide range of applications, such as movie produc-
+define 3D Gaussian primitives in the canonical space and
+                                                                            tion, video games, and virtual reality. Traditional ap-
+use deformation fields to map canonical primitives to ob-
+                                                                            proaches [5, 7, 8, 12, 30, 31, 50] use sequences of tex-
+servation spaces, achieving real-time dynamic view synthe-
+                                                                            tured meshes to represent dynamic 3D scenes. Such rep-
+sis. However, these methods often struggle to handle scenes
+                                                                            resentation requires complicated hardware setups for high-
+with complex motions due to the difficulty of optimizing de-
+                                                                            quality reconstruction, thus making traditional approaches
+formation fields. To overcome this problem, we propose
+                                                                            limited to controlled environments. NeRF-based meth-
+FreeTimeGS, a novel 4D representation that allows Gaus-
+                                                                            ods [10, 19, 29] have achieved impressive results in dy-
+sian primitives to appear at arbitrary time and locations. In
+                                                                            namic view synthesis by modeling scenes as neural implicit
+contrast to canonical Gaussian primitives, our representa-
+                                                                            representations. However, these representations are compu-
+tion possesses the strong flexibility, thus improving the abil-
+                                                                            tationally expensive, leading to slow rendering speed and
+ity to model dynamic 3D scenes. In addition, we endow
+                                                                            hindering practical applications.
+each Gaussian primitive with an motion function, allowing
+it to move to neighboring regions over time, which reduces                      Recently, a popular paradigm for dynamic view synthe-
+the temporal redundancy. Experiments results on several                     sis is to equip 3D Gaussian primitives [2, 11, 16, 22, 24, 26,
+datasets show that the rendering quality of our method out-                 36, 43, 47, 52] with deformation fields to model dynamic
+performs recent methods by a large margin. The code will                    scenes. These methods model the geometry and appear-
+be released for reproducibility.                                            ance of the scene based on Gaussian primitives in canonical
+                                                                            space and then use MLP networks to model scene motions
+                                                                            for deforming the canonical-space scene to observation-
+   ∗ Equal contribution. † Corresponding author: Xiaowei Zhou.              space scenes at particular moments. Although these meth-
+
+
+
+                                                                       21750
+ods achieve real-time and high-quality rendering perfor-         2. Related Work
+mance on scenes with small motions, they often struggle
+to handle scenes with complex motions. A plausible reason        Dynamic scene reconstruction with RGB-D cameras.
+is that when objects move much in the scene, these methods       In the early days, dynamic scene reconstruction leverages
+need to build long-range correspondences between canon-          RGB-D cameras to capture the dynamic geometry and ap-
+ical space and observation spaces, which is difficult to be      pearance of a scene. Methods pioneered by DynamicFu-
+recovered from RGB observations, as discussed in [20, 32].       sion [30] use depth sensors to build a TSDF model in canon-
+                                                                 ical space. Each frame applies non-rigid tracking to create
+    In this paper, we propose a novel 4D representation,         a deformation graph, enabling TSDF fusion in canonical
+named FreeTimeGS, for reconstructing dynamic 3D scenes           space to integrate reconstruction results across frames. Fu-
+with complex motions. In contrast to previous meth-              sion4D [8] and Holoportation [31] further refined this sys-
+ods [43, 47] that define Gaussian primitives at canonical        tem, achieving highly impressive dynamic reconstruction
+space only, FreeTimeGS allows Gaussian primitives to ap-         results. Subsequent works, such as DoubleFusion [50] and
+pear at arbitrary positions and time steps, possessing the       BodyFusion [49], introduced human body priors, enhancing
+strong flexibility. In addition, we assign an explicit motion    the robustness of non-rigid tracking.
+function to each Gaussian primitive, allowing it to move to          The main bottleneck of the aforementioned methods lies
+neighboring regions over time, which facilitates the reuse       in the lack of robustness and inaccuracy of non-rigid track-
+of Gaussian primitives along the temporal dimension and          ing. Data-driven approaches, such as DeepDeform [3]
+reduces the representation redundancy. By endowing Gaus-         and neural non-rigid tracking, address this by combining
+sian primitives high degrees of freedom, our representation      pre-trained optical flow networks and using CNNs to pre-
+has two advantages. First, this significantly improves the       dict non-rigid correspondences, achieving promising re-
+ability to model dynamic 3D scenes and the rendering qual-       sults. However, since these methods cannot optimize visual
+ity, as demonstrated in our experiments. Second, we only         appearance in an end-to-end manner, they still suffer from
+need to model short-range motions between Gaussian prim-         issues with robustness and poor visual quality. Addition-
+itives and observed scenes, compared with deformation-           ally, they rely on extra depth sensors, which increases the
+based methods [43, 47]. Therefore, our motion function           system complexity and overall cost.
+can be implemented as a linear function, alleviating the ill-
+posed optimization problem.                                      NeRF-based dynamic scene reconstruction. With the rise
+                                                                 of NeRF [29] and differentiable rendering, neural scene
+   During experiments, we find that optimizing Free-             representations have gradually become the mainstream ap-
+TimeGS with only rendering loss tend to get trapped in local     proach for dynamic scene reconstruction. Similar to the
+minima on fast-moving regions, leading to poor rendering         RGB-D methods discussed above, methods like [32, 33, 35]
+quality. To tackle this issue, we examine the opacity distri-    build a canonical NeRF model and use an MLP to cap-
+bution of Gaussian primitives and discover that a consider-      ture the deformation field from each frame to the canon-
+able part of it approaches 1. The result suggests that high      ical model. Another line of research, including Neural-
+opacity of some Gaussian primitives may prevent the gra-         Body [34] and subsequent works [6, 15, 37], utilizes body
+dient from back-propagating to all Gaussian primitives and       shape priors, storing per-frame structured latent codes on
+block the optimization process. Motivated by this observa-       the body parametric model to model the frame-dependent
+tion, we design a simple regularization strategy to penalize     dynamic appearances and geometries.
+the high opacity of Gaussian primitives in the early stage of       Neural3DV [18] opts to use time-conditioned neural rep-
+optimization, which effectively mitigates the local minima       resentations to directly model dynamic scenes in the 4D
+problem and improves our rendering quality.                      space. This approach provides high representational ca-
+                                                                 pacity, but modeling dynamics directly in 4D introduces
+   To validate the effectiveness of our method, we evaluate      considerable computational costs, leading to long training
+FreeTimeGS on multiple widely used datasets for multiview        times and high resource demands To address efficiency and
+dynamic novel view synthesis, including Neural3DV [18]           scalability, hybrid representations such as K-Planes [10]
+and ENeRF-Outdoor [23]. Our method achieves highest              and HEX-Plane [4] combine voxel grids with neural fields,
+quality on these public datasets compared with existing          substantially reducing training and inference times. Mean-
+state-of-the-art methods. To further evaluate and demon-         while, data-efficient methods [39, 40] utilize tensor factor-
+strate the capability of our method on challenging scenes,       ization to enable compact, long-sequence storage.
+we also collect a dataset with much faster and more com-            Despite the impressive progress achieved by NeRF-
+plex motions compared with Neural3DV [18]. Our method            based methods, challenges in dynamic scene reconstruction
+achieves best quality on it compared with the SOTA meth-         remain on slow rendering speeds, poor rendering quality
+ods by a large margin on both quality and efficiency.            and high storage requirements. In contrast, our proposed
+
+
+
+                                                            21751
+                                 z
+                                            y
+                                         Gaussian 1
+                                                   Vel                             Gaussian 2 (t+1)
+                                                       ocity
+                             x                                             ity
+                                                                     Veloc
+                                                                                 Vel
+                                                                                    ocity
+                                     Gaussian 2 (t-1)          Gaussian 2                                                                        Opactiy regularization
+                                                                                 Gaussian 3           t
+
+
+                      σ(t)
+
+                                                                                                            t
+                                         Gaussian 1            Gaussian 2               Gaussian 3                                                    Ground truth
+ Dynamic scene               Gaussian primitives at anytime anywhere                                             FreeTimeGS      Rasterization       Optimization
+
+
+Figure 2. Pipeline Overview. We represent a dynamic scene using Gaussian primitives that can appear anytime anywhere. Each Gaussian
+is assigned with a motion function to to model its movement. And its opacity is modulated by the temporal opacity function which control
+the impact of the Gaussian primitive over time. With this 4D representation, we further regularize the Gaussians with a 4D regularization
+loss and optimize the rasterization result with rendering loss for reconstructing a dynamic 3D scene from multi-view videos.
+
+approach demonstrates clear advantages in these aspects,                                          primitives at any time and location to faithfully represent
+making it a more feasible solution for scalable dynamic                                           the content of the dynamic scene. Figure 2 presents the
+scene reconstruction.                                                                             overview of the proposed approach. In Sec. 3.1, we first
+                                                                                                  introduce the design details of our 4D representation. Then,
+Gaussian-based dynamic scene reconstruction. Re-
+                                                                                                  Sec. 3.2 describes the optimization strategies to train the 4D
+cently, 3D Gaussian Splatting (3DGS) [14] has gained pop-
+                                                                                                  representation, which includes 4D regularization, periodic
+ularity as a mainstream approach due to its real-time render-
+                                                                                                  relocation, and 4D initialization.
+ing speed and sharp rendering quality. Dy3DGS [27] first
+adapts 3DGS to dynamic scenes by tracking Gaussian prim-
+itives on a frame-by-frame basis. Similar to RGB-D and                                            3.1. Gaussian primitives at anytime anywhere
+NeRF-based methods, [2, 11, 16, 22, 24, 26, 36, 43, 47, 52]
+model the geometry and appearance of the scene in canoni-                                         To represent the content of dynamic 3D scenes, we define
+cal space and then use deformation MLP networks to model                                          Gaussian primitives that can appear at any spatial position
+scene motions.                                                                                    and time step. In addition, our approach assigns a motion
+    Notably, instead of using deformation to model dynamic,                                       function to each Gaussian primitive, allowing it to dynami-
+4DGS [48] and STGS [21] leverage 4D Gaussian primi-                                               cally adjust its position over time to the neighboring region,
+tives to represent dynamic scenes. However, these method                                          thereby enhancing its ability of representing the geometry
+still struggle to handle scenes with complex motions due                                          and appearance of the dynamic scene. In addition, our ap-
+to their motion representation. 4DGS entangles geometry                                           proach assigns a motion function to each Gaussian primi-
+and velocity, making it difficult to optimize both. Specifi-                                      tive, allowing it to dynamically adjust its position over time
+cally, its spatial scale can be rotated by the velocity vector,                                   to the neighboring region to simulate the physical move-
+converted into temporal scale and vice versa. What’s more,                                        ment of real-world dynamic objects in the scene, thereby
+instead of Euclidean space, they optimize the velocity in an-                                     enhancing its ability to represent the evolving geometry and
+gular space, where in the case of fast motion, small angular                                      appearance of the dynamic scene.
+changes can lead to large Euclidean velocity changes, mak-                                            Specifically, each Gaussian primitive consists of eight
+ing it difficult to converge. STGS explicitly models motion                                       learnable parameters: position, time, duration, velocity,
+using polynomials and angular velocity, but this method has                                       scale, orientation, opacity and spherical harmonics coeffi-
+too many parameters and is difficult to optimize in complex                                       cients. To calculate the opacity and color of the Gaussian
+motion scenarios, leading to overfitting. LongVolCap [46]                                         primitive at any (x, t), we first move the Gaussian primitive
+also uses 4D Gaussian primitive representations, but it fo-                                       to obtain its actual spatial position µx (t) at time t according
+cuses on modeling long volumetric videos, which is orthog-                                        to its motion function, which is defined as:
+onal to our work and can be further integrated.
+                                                                                                                      µx (t) = µx + v · (t − µt ),                   (1)
+3. Method
+Given multi-view videos that capture a dynamic scene, our                                           where v ∈ R3 is the velocity of Gaussian primitive, and
+goal is to generate novel views of the target scene at ar-                                          µx and µt are the original position and time of Gaussian
+bitrary time. Our key idea is designing a novel 4D repre-                                           primitive, respectively.
+sentation, named FreeTimeGS, which leverages Gaussian                                                     Based on the moved Gaussian primitive, we calculate its
+
+
+
+                                                                                            21752
+color at position x through the spherical harmonics model:              where t is the time of observed images in each training iter-
+                   L X
+                     l
+                                                                        ation, N is the number of Gaussian primitives, and sg[·] is
+                   X                                                    the stop-gradient operation. Here we introduce the temporal
+              c=               clm Ylm (d(µx (t))),               (2)
+                                                                        opacity σ(t) as the weight of the regularization loss, which
+                   l=0 m=−l
+                                                                        represents the impact of Gaussian primitives at a particular
+where c is the color of Gaussian primitive, L is the degree             time. For Gaussian primitives with less impact, we reduce
+of spherical harmonics, clm is the spherical harmonics co-              the penalty on them. Note that the stop-gradient operation is
+efficients, d(µx (t)) is the view direction at position µx (t),         applied to prevent the regularization loss from minimizing
+and Ylm (d(µx (t))) is the spherical harmonics basis func-              the temporal opacity.
+tion with direction d(µx (t)).
+    The opacity of the moved Gaussian primitive at position              Periodic relocation of primitives. Although the regular-
+x and time t is defined as:                                              ization loss can effectively improve the rendering quality, it
+                                                                       causes a dramatic increase in the number of Gaussian prim-
+                                            T
+  σ(x, t) = σ(t) ∗ σ ∗ exp − 12 (x − µx (t)) Σ−1 (x − µx (t)) ,   (3)    itives needed to represent the same scene. To mitigate this,
+                                                                         we design a periodic relocation strategy to move Gaussian
+where σ is the original opacity of Gaussian primitive. Σ is              primitives with low opacity to the region with high opac-
+the covariance matrix defined by the scale and orientation               ity. Specifically, we design a sampling score s for each
+of Gaussian primitive: Σ = RSS T RT . σ(t) is the tem-                   Gaussian primitive to measure the region that requires more
+poral opacity that aims to control the impact of the Gaus-               primitives:
+sian primitive over time. To enable the time and duration
+of Gaussian primitives to be automatically adjusted by ren-                                       s = λg ▽g + λo σ                     (7)
+dering gradients, the temporal opacity should be a unimodal              where ▽g and σ are the spatial gradient and opacity of
+function with a scaling parameter. Therefore, our approach               the Gaussian primitive, and λg and λo are the weights of
+models σ(t) as a Gaussian distribution:                                  the gradient and opacity, respectively. For every N itera-
+                                        2 !                            tions, we move the Gaussian primitives with opacity below
+                              1 t − µt
+             σ(t) = exp −                     ,         (4)              a threshold to the region with high sampling score.
+                              2      s
+                                                                            Initialization of our representation. To further improve
+where µt and s is the time and the duration of the Gaussian                 the rendering quality, our approach proposes a strategy to
+primitive.                                                                  initialize the position, time, and velocity of Gaussian prim-
+3.2. Training                                                               itives. For each video frame, we first use ROMA [9] to
+                                                                            obtain 2D matches across multi-view images and then cal-
+Similar to 3DGS [14], our approach optimizes the param-                     culate 3D points through 3D triangulation. These 3D points
+eters of Gaussian primitives by minimizing the rendering                    and the corresponding time step are used to initialize the
+loss between the observed images and the rendered images:                   position and time of Gaussian primitives. Subsequently, 3D
+                                                                            points of two video frames are matched by k-nearest neigh-
+  Lrender = λimg Limg + λssim Lssim + λperc Lperc , (5)
+                                                                            bor algorithm, and the translation between the point pairs
+where Limg , Lssim , and Lperc are the image loss, SSIM                     are taken as the velocity of Gaussian primitives.
+loss [42], and perceptual loss [51], respectively.                              During the optimization process, we further anneal the
+   However, we find that simply optimizing the proposed                     optimization rate of velocity according to λt = λ1−t0   + λt1 ,
+representation with only rendering loss often leads to poor                 where t goes from 0 to 1 during training. This annealing
+rendering quality in fast-moving or complex motion re-                      motion scheduler helps to model the fast motions in the
+gions. To address this problem, we analyze the distribution                 early stage and the complex motion in the later stage.
+of Gaussian primitives’ opacity and find that a significant
+portion of it is near 1. Therefore, a plausible reason for the              3.3. Implementation Details
+poor quality is that high opacity of some Gaussian primi-
+                                                                         We implement our approach using PyTorch. We use the
+tives can prevent the gradient from backpropagating to all
+                                                                         Adam optimizer for optimization with the same settings as
+Gaussian primitives, hindering the optimization process.
+                                                                         3DGS. The model is trained for 30k iterations for a se-
+4D regularization. Based on the observation, our approach                quence length of 300 frames, which takes around 1 hour
+designs a regularization loss to constrain high opacity val-             on an RTX 4090 GPU. The weight of the 4D regulariza-
+ues of Gaussian primitives, which is defined as:                         tion loss is λreg set to 1e−2 , and the weights of the image,
+                                N
+                                                                         SSIM and perceptual loss λimg , λssim , λperc are set to 0.8,
+                           1 X                                           0.2 and 0.01, respectively. The weights of the gradient and
+              Lreg (t) =         (σ ∗ sg [σ(t)]) ,                (6)
+                           N i=1                                         opacity in the sampling score λg , λo are set to 0.5 and 0.5,
+
+
+
+                                                                    21753
+respectively. And the periodic relocation is performed every     Table 1. Quantitative comparison on the Neural 3D Video [19]
+N = 100 iterations.                                              Dataset. We report PSNR, DSSIM1 , DSSIM2 , and LPIPS to eval-
+                                                                 uate the rendering quality. 1 : only includes the Flame Salmon
+                                                                 scene. 2 : excludes the Coffee Martini scene.
+4. Experiments
+                                                                                              PSNR↑     DSSIM1 ↓     DSSIM2 ↓    LPIPS↓
+Datasets. We conducte our experiments using three                    Neural Volume1 [25]       22.80        -         0.062      0.295
+                                                                     LLFF1 [28]                23.24        -         0.076      0.235
+datasets: Neural3DV [19], ENeRF-Outdoor [23], and our
+                                                                     DyNeRF1 [19]              29.58        -         0.020      0.083
+self-collected SelfCap dataset. Neural3DV contains six               HexPlane2 [4]             31.71        -         0.014      0.075
+scenes, each captured by 19-21 cameras with a resolution             K-Planes [10]             31.63        -         0.018        -
+of 2704 × 2028 at 30 FPS. For each scene, we use the first           MixVoxels-L [41]          31.34        -         0.017      0.096
+                                                                     MixVoxels-X [41]          31.73        -         0.015      0.064
+300 frames for training and evaluation, with an image resize         HyperReel [1]             31.10      0.036         -        0.096
+ratio of 0.5. ENeRF-Outdoor is a dynamic outdoor dataset             NeRFPlayer [38]           30.96      0.034         -        0.111
+with three scenes, captured by 18 synchronized cameras at            Deformable-3DGS [43]      31.15      0.030         -        0.049
+a resolution of 1920 × 1080 and 60 FPS. We also use the              C-D3DGS [13]              30.46        -         0.022      0.150
+                                                                     SWinGS [36]               31.10      0.030         -        0.096
+first 300 frames for training and evaluation, with an image          Ex4DGS [17]               32.11      0.030       0.015      0.048
+resize ratio of 1. As the Neural3DV and ENeRF-Outdoor                4DGS [48]                 32.01        -         0.014      0.055
+datasets lack significant motion scenes, we collect our own          STGS [21]                 32.05      0.026       0.014      0.044
+dataset, SelfCap, to test performance in large-motion sce-           Ours                      33.19      0.026       0.013      0.036
+narios. SelfCap contains eight scenes, each with 60 frames
+captured by 22-24 cameras, including daily life scenes such       Table 2. Quantitative comparison on the ENeRF-Outdoor [23]
+                                                                  Dataset. Green and yellow cell colors indicate the best and the
+as dancing, playing with pets, and repairing bicycles. Com-
+                                                                  second best results, respectively.
+pared with existing datasets, SelfCap contains more chal-
+lenging scenes with fast and complex motion. The resolu-                               PSNR↑           DSSIM2 ↓        LPIPS↓        FPS↑
+tion is 3840 × 2160 (1080 × 1080 for the bike scene) at 60
+FPS, with an image resize ratio of 0.5 (1 for the bike scene).       ENeRF [23]            24.96          0.107         0.299          3
+                                                                     4K4D [44]             25.28          0.096         0.379        220
+Metrics. We use PSNR, DSSIM [42] and LPIPS [51] to ac-               4DGS [48]             24.82          0.089         0.317         90
+cess the quality of the rendered images in our method and            STGS [21]             24.93          0.091         0.297        226
+baselines. PSNR measures the l2 difference between a re-             Ours                  25.36          0.077         0.244        454
+constructed image and its ground truth, with higher values
+indicating less disparity. DSSIM1 and DSSIM2 measure
+                                                                  Table 3. Quantitative comparison on our SelfCap Dataset. We
+the structural similarity, where higher values denote greater     include quantitative results for both the entire image and only dy-
+similarity. DSSIM1 sets data range to 1.0, while DSSIM2           namic regions (entire/dynamic). For 4DGS and STGS, we tra-
+sets to 2.0. LPIPS evaluates perceptual similarity, aligned       versed different camera near plane settings during testing to max-
+with human perception. Lower LPIPS values indicate better         imize floater removal. Green and yellow cell colors indicate the
+perceptual similarity.                                            best and the second best results, respectively.
+
+4.1. Comparison Experiments                                                           PSNR↑            DSSIM2 ↓         LPIPS↓       FPS↑
+                                                                     STGS [21]     24.97/25.32         0.048/0.029    0.273/0.123        142
+Neural3DV. Qualitative and quantitative comparisons are
+                                                                     4DGS [48]     25.98/26.75         0.036/0.019    0.237/0.104        65
+shown in Figure 4 and Table 1, respectively. As evident in
+Table 1, our method outperforms all baselines in all metrics.        Ours          27.41/29.38         0.024/0.013    0.204/0.080        467
+Figure 4 illustrates our method’s ability to more accurately
+capture details in dynamic regions, such as the tail section
+of the flamethrower. Additionally, our method can achieved        ture fine details in rapid motion, particularly in objects such
+better results in static background regions, exemplified by       as the doll held by the actors and the text on the T-shirt.
+clearer rendering of the forest visible through the window.
+                                                                  SelfCap. Qualitative and quantitative comparisons are
+ENeRF-Outdoor. Qualitative and quantitative compar-               shown in Figure 5 and Table 3, respectively. Our method
+isons are shown in Figure 3 and Table 2, respectively. This       achieves the best performance on the SelfCap dataset, which
+dataset introduces increased dynamic motion, as the ac-           contains challenging dynamic scenes with fast and complex
+tors exhibit extensive arm movements and manipulate a doll        motion. As shown in Table 3, our method outperforms all
+with a wide range of motion. As indicated in Table 2, our         baselines in all metrics. In Figure 5, our method can bet-
+method achieves the highest performance across metrics.           ter capture the details of the dynamic regions, like the fast-
+Figure 3 further demonstrates our method’s ability to cap-        moving hands and the complex motion of the dancer’s body.
+
+
+
+                                                             21754
+     Ground Truth
+
+
+
+
+         Ours
+
+
+
+
+         STGS
+
+
+
+
+         4K4D
+
+
+Figure 3. Qualitative comparison on the ENeRF-Outdoor Dataset. Our method achieves higher quality for fast-moving objects and
+regions, such as the swinging arms and dolls in hands, and clearer text details on the clothes.
+
+
+
+                                                                               Ground Truth                   Ours
+         Ground Truth                               Ours
+
+
+
+
+                                                                                    4DGS                     STGS
+              4DGS                                  STGS
+
+
+
+
+Figure 4. Qualitative comparison on the Neural 3D Video Dataset. Our method achieves the best rendering quality compared with
+baseline methods, especially for distant static regions and fast-moving dynamic regions.
+
+
+
+
+                                                           21755
+     Ground Truth
+
+
+
+
+           Ours
+
+
+
+
+          STGS
+
+
+
+
+          4DGS
+
+
+
+
+     Ground Truth
+
+
+
+
+           Ours
+
+
+
+
+          STGS
+
+
+
+
+          4DGS
+
+
+Figure 5. Qualitative comparison on our SelfCap Dataset. Our method achieves significantly higher rendering quality than other
+methods. For example, in the dance sequence, other methods struggle to handle fast-moving regions, such as fingers, faces, and texture
+details on clothes, while our method retains their details. In the bike sequence, other methods failed to model the complex motions of hands
+and rapidly rotating pedals, while our method maintain high-quality rendering results.
+
+
+
+                                                                  21756
+  Ground Truth                Ours                      w/o                  w/o                   w/o                    w/o
+                                                    our motion        4d regularization    periodic relocation     4d initialization
+
+
+Figure 6. Ablation study of proposed components on dance1 sequence of our SelfCap Dataset. Removing our proposed components
+leads to visible artifacts in the rendered results, especially in the dynamic regions with fast motion. Our method produce high-quality
+results even in the challenging dynamic scenes.
+
+Table 4. Ablation studies. We include quantitative results for         experiments.
+both entire sequence and the subsequence with fastest motion (en-
+tire/fastest)                                                          Periodic relocation. The ”w/o periodic relocation” vari-
+                                                                       ant use the same densify strategy as the 3DGS [14] and do
+                                 .
+                           PSNR↑         DSSIM2 ↓      LPIPS↓          not perform the proposed periodic relocation. We also con-
+w/o our motion          28.10/26.92 0.024/0.031 0.165/0.161            trol the number of gaussians to be the same as the proposed
+w/o 4d regularization 28.68/29.09 0.023/0.024 0.159/0.150              method for a fair comparison. Without the periodic reloca-
+w/o periodic relocation 29.07/29.15 0.020/0.021 0.155/0.146            tion, the model tend to use more gaussians with lower opac-
+w/o 4d initialization   28.33/27.06 0.023/0.030 0.162/0.158            ity to model the scene, leading to suboptimal results when
+Ours                     29.74/30.75 0.018/0.017 0.152/0.133
+                                                                       the number of gaussians is limited.
+                                                                       4D initialization. The ”w/o 4d initialization” variant re-
+Table 5. Ablation studies. We include quantitative results for         moves the proposed velocity initialization method and use
+both entire sequence and the subsequence with fastest motion (en-      zero velocity initialization instead. As shown in Table 4
+tire/fastest)                                                          and Figure 6, the proposed 4D initialization method signifi-
+                                 .                                     cantly improve the model’s ability to model the fast motion
+                     PSNR↑           DSSIM2 ↓        LPIPS↓            in the scene.
+  λreg = 0         28.68/29.09       0.023/0.024    0.159/0.150
+  λreg = 1e−3      29.10/29.79       0.021/0.021    0.154/0.139        5. Conclusions
+  λreg = 1e−2      29.74/30.75       0.018/0.017    0.152/0.133
+  λreg = 1e−1      26.43/27.33       0.035/0.036    0.198/0.183
+                                                                       This paper introduces FreeTimeGS, a novel 4D representa-
+                                                                       tion method for dynamic 3D scenes. FreeTimeGS allows
+                                                                       Gaussian primitives to emerge at any time and location, of-
+4.2. Ablation Studies                                                  fering enhanced flexibility to model complex motions. By
+                                                                       assigning an optimizable explicit motion function and tem-
+We perform ablation studies on the 60-frame dance1 se-                 poral opacity function to each Gaussian primitive, our rep-
+quence of the SelfCap dataset and further report the results           resentation can more faithfully and flexibly represent the
+on 10-frame with the fastest motion to evaluate the perfor-            dynamic scene. Furthermore, we propose a simple regu-
+mance of our method in high-motion scenarios. Quantita-                larization strategy that penalizes high opacity in Gaussian
+tive and qualitative results are shown in Table 4, Table 5,            primitives, effectively mitigating the local minima problem
+and Figure 6.                                                          during optimization. Experimental results demonstrate that
+                                                                       FreeTimeGS achieves higher rendering quality and render-
+Motion representation. The ”w/o our motion” variant re-
+                                                                       ing speed on multiple widely-used datasets for multi-view
+moves the proposed motion representation and replace it
+                                                                       dynamic novel view synthesis.
+with the motion representation used in 4DGS [48]. As
+                                                                           Notably, our method still has a few limitations. For one,
+shown in Table 4 and Figure 6, our motion representa-
+                                                                       our method still requires a length reconstruction process for
+tion significantly improves the ability to model dynamic 3D
+                                                                       each dynamic scene. Future work could potentially mitigate
+scenes, especially in region with fast and complex motion.
+                                                                       this by incorporating generative priors on the proposed rep-
+4D regularization. The ”w/o 4d regularization” variant re-             resentation for optimization-free reconstruction. Another
+moves the 4D regularization loss Lreg in Eq. 6. Without the            limitation of our method is that the current representation
+4D regularization, gaussians with large opacity will hinder            doesn’t support relighting, only focusing on novel view syn-
+the optimization process, leading to suboptimal results on             thesis. Future work could extend the current representation
+detailed region. We also ablate the effect of different λreg           with surface normal and material properties to extend its
+values in Table 5 and choose λreg = 1e−2 for all of the                applicability for relighting.
+
+
+
+                                                                  21757
+Acknowledgement This work was partially supported by               [12] Anna Hilsmann, Philipp Fechteler, Wieland Morgenstern,
+NSFC (No. 62172364, No. U24B20154, No. 62402427),                       Wolfgang Paier, Ingo Feldmann, Oliver Schreer, and Peter
+Zhejiang Provincial Natural Science Foundation of China                 Eisert. Going beyond free viewpoint: creating animatable
+(No. LR25F020003), and Information Technology Center                    volumetric video of human performances. IET Computer Vi-
+and State Key Lab of CAD&CG, Zhejiang Univer-                           sion, pages 350–358, 2020. 1
+sity. We also acknowledge the EasyVolcap [45] codebase.            [13] Kai Katsumata, Duc Minh Vo, and Hideki Nakayama. A
+                                                                        compact dynamic 3d gaussian representation for real-time
+                                                                        dynamic view synthesis. In European Conference on Com-
+References                                                              puter Vision, 2023. 5
+                                                                   [14] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+ [1] Benjamin Attal, Jia-Bin Huang, Christian Richardt, Michael         and George Drettakis. 3d gaussian splatting for real-time
+     Zollhoefer, Johannes Kopf, Matthew O’Toole, and Changil            radiance field rendering. ACM Transactions on Graphics
+     Kim. Hyperreel: High-fidelity 6-dof video with ray-                (TOG), 42(4):1–14, 2023. 3, 4, 8
+     conditioned sampling. In Proceedings of the IEEE/CVF          [15] Youngjoong Kwon, Dahun Kim, Duygu Ceylan, and Henry
+     Conference on Computer Vision and Pattern Recognition,             Fuchs. Neural human performer: Learning generalizable ra-
+     pages 16610–16620, 2023. 5                                         diance fields for human performance rendering. Advances in
+ [2] Jeongmin Bae, Seoha Kim, Youngsik Yun, Hahyun Lee, Gun             Neural Information Processing Systems, 34, 2021. 2
+     Bang, and Youngjung Uh. Per-gaussian embedding-based          [16] Isaac Labe, Noam Issachar, Itai Lang, and Sagie Be-
+     deformation for deformable 3d gaussian splatting. ArXiv,           naim. Dgd: Dynamic 3d gaussians distillation. ArXiv,
+     abs/2404.03613, 2024. 1, 3                                         abs/2405.19321, 2024. 1, 3
+ [3] Aljaž Božič, Michael Zollhöfer, Christian Theobalt, and   [17] Junoh Lee, Chang-Yeon Won, Hyunjun Jung, Inhwan Bae,
+     Matthias Nießner. Deepdeform: Learning non-rigid rgb-d             and Hae-Gon Jeon. Fully explicit dynamic gaussian splat-
+     reconstruction with semi-supervised data. 2020. 2                  ting. 2024. 5
+ [4] Ang Cao and Justin Johnson. Hexplane: A fast representa-      [18] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon
+     tion for dynamic scenes. arXiv, 2023. 2, 5                         Green, Christoph Lassner, Changil Kim, Tanner Schmidt,
+ [5] Dan Casas, Marco Volino, John Collomosse, and Adrian               Steven Lovegrove, Michael Goesele, and Zhaoyang Lv. Neu-
+     Hilton. 4d video textures for interactive character appear-        ral 3d video synthesis. CVPR, 2022. 2
+     ance. In Computer Graphics Forum, pages 371–380. Wiley        [19] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon
+     Online Library, 2014. 1                                            Green, Christoph Lassner, Changil Kim, Tanner Schmidt,
+                                                                        Steven Lovegrove, Michael Goesele, Richard Newcombe,
+ [6] Wei Cheng, Su Xu, Jingtan Piao, Chen Qian, Wayne Wu,
+                                                                        et al. Neural 3d video synthesis from multi-view video. In
+     Kwan-Yee Lin, and Hongsheng Li. Generalizable neural
+                                                                        Proceedings of the IEEE/CVF Conference on Computer Vi-
+     performer: Learning robust radiance fields for human novel
+                                                                        sion and Pattern Recognition, pages 5521–5531, 2022. 1,
+     view synthesis. arXiv preprint arXiv:2204.11798, 2022. 2
+                                                                        5
+ [7] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Den-
+                                                                   [20] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang.
+     nis Evseev, David Calabrese, Hugues Hoppe, Adam Kirk,
+                                                                        Neural scene flow fields for space-time view synthesis of dy-
+     and Steve Sullivan. High-quality streamable free-viewpoint
+                                                                        namic scenes. In CVPR, 2021. 2
+     video. ACM Transactions on Graphics (ToG), 34(4):1–13,
+                                                                   [21] Zhan Li, Zhang Chen, Zhong Li, and Yinghao Xu. Space-
+     2015. 1
+                                                                        time gaussian feature splatting for real-time dynamic view
+ [8] Mingsong Dou, Sameh Khamis, Yury Degtyarev, Philip                 synthesis. 2024 IEEE/CVF Conference on Computer Vision
+     Davidson, Sean Ryan Fanello, Adarsh Kowdle, Sergio Orts            and Pattern Recognition (CVPR), pages 8508–8520, 2023.
+     Escolano, Christoph Rhemann, David Kim, Jonathan Taylor,           1, 3, 5
+     et al. Fusion4d: Real-time performance capture of challeng-   [22] Yiqing Liang, Numair Khan, Zhengqin Li, Thu Nguyen-
+     ing scenes. ACM TOG, 2016. 1, 2                                    Phuoc, Douglas Lanman, James Tompkin, and Lei Xiao.
+ [9] Johan Edstedt, Qiyu Sun, Georg Bökman, Mårten                    Gaufre: Gaussian deformation fields for real-time dynamic
+     Wadenbäck, and Michael Felsberg. RoMa: Robust Dense               novel view synthesis. ArXiv, abs/2312.11458, 2023. 1, 3
+     Feature Matching. IEEE Conference on Computer Vision          [23] Haotong Lin, Sida Peng, Zhen Xu, Yunzhi Yan, Qing Shuai,
+     and Pattern Recognition, 2024. 4                                   Hujun Bao, and Xiaowei Zhou. Efficient neural radiance
+[10] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk               fields for interactive free-viewpoint video. In SIGGRAPH
+     Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes:            Asia Conference Proceedings, 2022. 2, 5
+     Explicit radiance fields in space, time, and appearance. In   [24] Qingming Liu, Yuan Liu, Jie-Chao Wang, Xianqiang Lyv,
+     Proceedings of the IEEE/CVF Conference on Computer Vi-             Peng Wang, Wenping Wang, and Junhui Hou. Modgs: Dy-
+     sion and Pattern Recognition, pages 12479–12488, 2023. 1,          namic gaussian splatting from casually-captured monocular
+     2, 5                                                               videos. 2024. 1, 3
+[11] Zhiyang Guo, Wen gang Zhou, Li Li, Min Wang, and              [25] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+     Houqiang Li. Motion-aware 3d gaussian splatting for effi-          Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural vol-
+     cient dynamic scene reconstruction. ArXiv, abs/2403.11447,         umes: Learning dynamic renderable volumes from images.
+     2024. 1, 3                                                         ACM Trans. Graph., 38(4):65:1–65:14, 2019. 5
+
+
+
+
+                                                               21758
+[26] Zhicheng Lu, Xiang Guo, Le Hui, Tianrui Chen, Min Yang,                alization and Computer Graphics, 29(5):2732–2742, 2023.
+     Xiao Tang, Feng Zhu, and Yuchao Dai. 3d geometry-aware                 5
+     deformable gaussian splatting for dynamic view synthesis.         [39] Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas
+     2024 IEEE/CVF Conference on Computer Vision and Pat-                   Müller, Morgan McGuire, Alec Jacobson, and Sanja Fidler.
+     tern Recognition (CVPR), pages 8900–8910, 2024. 1, 3                   Variable bitrate neural fields. ACM SIGGRAPH 2022 Con-
+[27] Jonathon Luiten, Georgios Kopanas, Bastian Leibe, and                  ference Proceedings, 2022. 2
+     Deva Ramanan.           Dynamic 3d gaussians: Tracking            [40] Jiaxiang Tang, Xiaokang Chen, Jingbo Wang, and Gang
+     by persistent dynamic view synthesis.          arXiv preprint          Zeng. Compressible-composable nerf via rank-residual de-
+     arXiv:2308.09713, 2023. 3                                              composition. arXiv preprint arXiv:2205.14870, 2022. 2
+[28] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,        [41] Feng Wang, Sinan Tan, Xinghang Li, Zeyue Tian, and Huap-
+     Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and                  ing Liu. Mixed neural voxels for fast multi-view video syn-
+     Abhishek Kar. Local light field fusion: Practical view syn-            thesis. 2023 IEEE/CVF International Conference on Com-
+     thesis with prescriptive sampling guidelines. ACM Transac-             puter Vision (ICCV), pages 19649–19659, 2022. 5
+     tions on Graphics (TOG), 2019. 5                                  [42] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+[29] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,                   Simoncelli. Image quality assessment: from error visibility
+     Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:                 to structural similarity. IEEE TIP, 2004. 4, 5
+     Representing scenes as neural radiance fields for view syn-       [43] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng
+     thesis. Communications of the ACM, 65(1):99–106, 2021. 1,              Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Wang Xinggang.
+     2                                                                      4d gaussian splatting for real-time dynamic scene rendering.
+[30] Richard A Newcombe, Dieter Fox, and Steven M Seitz.                    arXiv preprint arXiv:2310.08528, 2023. 1, 2, 3, 5
+     Dynamicfusion: Reconstruction and tracking of non-rigid           [44] Zhen Xu, Sida Peng, Haotong Lin, Guangzhao He, Ji-
+     scenes in real-time. In CVPR, 2015. 1, 2                               aming Sun, Yujun Shen, Hujun Bao, and Xiaowei Zhou.
+                                                                            4k4d: Real-time 4d view synthesis at 4k resolution. 2024
+[31] Sergio Orts-Escolano, Christoph Rhemann, Sean Fanello,
+                                                                            IEEE/CVF Conference on Computer Vision and Pattern
+     Wayne Chang, Adarsh Kowdle, Yury Degtyarev, David Kim,
+                                                                            Recognition (CVPR), pages 20029–20040, 2023. 5
+     Philip L Davidson, Sameh Khamis, Mingsong Dou, et al.
+     Holoportation: Virtual 3d teleportation in real-time. In UIST,    [45] Zhen Xu, Tao Xie, Sida Peng, Haotong Lin, Qing Shuai,
+     2016. 1, 2                                                             Zhiyuan Yu, Guangzhao He, Jiaming Sun, Hujun Bao, and
+                                                                            Xiaowei Zhou. Easyvolcap: Accelerating neural volumetric
+[32] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien
+                                                                            video research. 2023. 9
+     Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo
+                                                                       [46] Zhen Xu, Yinghao Xu, Zhiyuan Yu, Sida Peng, Jiaming Sun,
+     Martin-Brualla. Nerfies: Deformable neural radiance fields.
+                                                                            Hujun Bao, and Xiaowei Zhou. Representing long volumet-
+     In ICCV, 2021. 2
+                                                                            ric video with temporal gaussian hierarchy. ACM Transac-
+[33] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T
+                                                                            tions on Graphics, 43(6), 2024. 3
+     Barron, Sofien Bouaziz, Dan B Goldman, Ricardo Martin-
+                                                                       [47] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing
+     Brualla, and Steven M Seitz.         Hypernerf: A higher-
+                                                                            Zhang, and Xiaogang Jin. Deformable 3d gaussians for
+     dimensional representation for topologically varying neural
+                                                                            high-fidelity monocular dynamic scene reconstruction. arXiv
+     radiance fields. arXiv preprint arXiv:2106.13228, 2021. 2
+                                                                            preprint arXiv:2309.13101, 2023. 1, 2, 3
+[34] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang,             [48] Zeyu Yang, Hongye Yang, Zijie Pan, Xiatian Zhu, and Li
+     Qing Shuai, Hujun Bao, and Xiaowei Zhou. Neural body:                  Zhang. Real-time photorealistic dynamic scene representa-
+     Implicit neural representations with structured latent codes           tion and rendering with 4d gaussian splatting. arXiv preprint
+     for novel view synthesis of dynamic humans. In Proceed-                arXiv 2310.10642, 2023. 1, 3, 5, 8
+     ings of the IEEE/CVF Conference on Computer Vision and            [49] Tao Yu, Kaiwen Guo, Feng Xu, Yuan Dong, Zhaoqi Su, Jian-
+     Pattern Recognition, pages 9054–9063, 2021. 2                          hui Zhao, Jianguo Li, Qionghai Dai, and Yebin Liu. Bodyfu-
+[35] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and                   sion: Real-time capture of human motion and surface geom-
+     Francesc Moreno-Noguer. D-nerf: Neural radiance fields for             etry using a single depth camera. In The IEEE International
+     dynamic scenes. In ICCV, 2021. 2                                       Conference on Computer Vision (ICCV). IEEE, 2017. 2
+[36] Richard Shaw, Jifei Song, Arthur Moreau, Michal                   [50] Tao Yu, Zerong Zheng, Kaiwen Guo, Jianhui Zhao, Qionghai
+     Nazarczuk, Sibi Catley-Chandar, Helisa Dhamo, and Ed-                  Dai, Hao Li, Gerard Pons-Moll, and Yebin Liu. Doublefu-
+     uardo Pérez-Pellitero. Swings: Sliding windows for dynamic            sion: Real-time capture of human performances with inner
+     3d gaussian splatting. 2023. 1, 3, 5                                   body shapes from a single depth sensor. In CVPR, 2018. 1,
+[37] Qing Shuai, Chen Geng, Qi Fang, Sida Peng, Wenhao Shen,                2
+     Xiaowei Zhou, and Hujun Bao. Novel view synthesis of              [51] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shecht-
+     human interactions from sparse multi-view videos. In SIG-              man, and Oliver Wang. The unreasonable effectiveness of
+     GRAPH Conference Proceedings, 2022. 2                                  deep features as a perceptual metric. In Proceedings of the
+[38] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele                 IEEE conference on computer vision and pattern recogni-
+     Chen, Junsong Yuan, Yi Xu, and Andreas Geiger. Nerf-                   tion, pages 586–595, 2018. 4, 5
+     player: A streamable dynamic scene representation with de-        [52] Ruijie Zhu, Yanzhe Liang, Hanzhi Chang, Jiacheng Deng,
+     composed neural radiance fields. IEEE Transactions on Visu-            Jiahao Lu, Wenfei Yang, Tianzhu Zhang, and Yongdong
+
+
+
+
+                                                                  21759
+Zhang. Motiongs: Exploring explicit motion guidance
+for deformable 3d gaussian splatting. arXiv preprint
+arXiv:2410.07707, 2024. 1, 3
+
+
+
+
+                                                   21760
+

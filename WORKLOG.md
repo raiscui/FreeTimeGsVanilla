@@ -311,3 +311,18 @@ python tools/exportor/export_splat4d.py \
   - `Export (Unity) -> Export .splat4d (binary)` 增加一条“已验证的真实大 ckpt”导出命令,直接输出到:
     - `results/bar_release_full/out_0_61/exports/ckpt_29999_v2_sh3_seg50_k512_f32_colmap_latest.splat4d`
   - 同时把 Export 小节里的示例命令统一改为 `python3 ...`,避免环境里 `python` 指向不一致导致的误用.
+
+## 2026-02-23 03:05:17 UTC
+- 下载并快速摘录 FreeTimeGS(CVPR 2025)论文关键定义与公式,重点确认"Gaussian primitives at anytime anywhere"的真实含义(µt+duration+velocity+temporal opacity).
+- 对照本仓库实现:
+  - 训练侧 `src/simple_trainer_freetime_4d_pure_relocation.py` 已按论文实现 motion + temporal opacity.
+  - 导出侧 `tools/exportor/export_splat4d.py` 的 `.splat4d v2(gaussian)` 语义与论文时间高斯核对齐(v1 为兼容性 hard-window 近似).
+- 将关键原文摘录与工程映射追加到 `notes.md`.
+
+## 2026-02-23 04:17:39 UTC
+- 续档 `task_plan.md`(到 1000 行边界): 将旧文件移动为历史版本并归档到 `archive/`.
+- 新增规格文档 `specs/freetimegs_to_splat4d_mapping.md`:
+  - 摘录 FreeTimeGS 论文的关键短句与公式(µx(t), σ(t)).
+  - 明确 ckpt 字段语义: `means/times/durations(log sigma)/velocities(m/norm_time)`.
+  - 给出`.splat4d v1(window)`与`.splat4d v2(gaussian)`的写入规则与 Unity runtime(shader)的解释方式.
+- 使用 `tools/mermaid-validator` 校验规格文档内 Mermaid flowchart 语法通过.

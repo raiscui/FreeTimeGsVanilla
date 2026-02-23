@@ -635,3 +635,47 @@ python3 -c "print(open('/tmp/splat4d_smoke_gaussian_auto.splat4d','rb').read(8))
   - `--output-space colmap --colmap-dir results/bar_release_full/work_0_61/data/sparse/0`
   - `--sh-bands 3 --frame-count 61 --shn-count 512 --shn-centroids-type f32 --shn-labels-encoding delta-v1 --delta-segment-length 50`
   - `--shn-codebook-sample 200000 --shn-kmeans-iters 10`
+
+# 笔记: FreeTimeGS "anytime anywhere" 与 `.splat4d` 映射
+
+## 2026-02-23 03:05:17 UTC
+
+### 论文原文摘录(FreeTimeGS, CVPR 2025)
+- PDF: `tmp/papers/FreeTimeGS_CVPR2025.pdf`
+- p1(Abstract): "... allows Gaussian primitives to appear at arbitrary time and locations."
+- p3(Sec 3.1): "... Gaussian primitives that can appear at any spatial position and time step."
+- p3(Sec 3.1): "... consists of eight learnable parameters: position, time, duration, velocity, ..."
+- p3(Eq.1): `µx(t) = µx + v · (t − µt)`
+- p4(Eq.4): `σ(t) = exp(-1/2 * ((t-µt)/s)^2)`
+
+### 这在本仓库里对应什么
+- 训练侧(FreeTimeGS 表示): `src/simple_trainer_freetime_4d_pure_relocation.py` 在开头 docstring 已把(µx,µt,s,v)与时间核写成“Key Equations”.
+- `.splat4d` 导出侧: `tools/exportor/export_splat4d.py` 明确说明 ckpt 已包含 `means/times/durations/velocities`,所以"不需要先导出一堆 PLY 再做差分拟合".
+- `.splat4d` 的 time/duration 语义:
+  - v1(window): 用 `--temporal-threshold` 把论文的时间高斯核近似为硬窗口(兼容旧 importer).
+  - v2(gaussian): 直接写 `time=mu_t` 和 `duration=sigma=exp(log_sigma)`,更贴近论文.
+
+### 关于"PLY 序列必须对齐点云数量"的判断
+- 论文的"free"主要是指: 每个 Gaussian 自带时间中心(µt)与时长(s),因此它只在某个时间段附近有显著贡献.
+- 这不要求 per-frame PLY 必须“点数/ID 对齐”.
+  - 如果按“可见性”导出(例如按 combined opacity 做阈值过滤),每帧点数天然会变化.
+  - 如果为了压缩/增量更新而需要稳定 ID,可以在文件里保留全量 N 个 splat,并在 runtime 用时间核让它们在大多数帧接近不可见.
+
+## 四文件摘要(用于决定是否提取 skill)
+
+### 2026-02-23 04:14:39 UTC
+- 任务目标(task_plan): 为 FreeTimeGS 的(µx,µt,s,v,σ(t))与`.splat4d v1/v2`建立一份可复用映射规格,并解释 Unity runtime 语义.
+- 关键决定(task_plan): 先交付短规格(表格+关键公式+1张图),避免过度铺陈.
+- 关键发现(notes/WORKLOG):
+  - trainer 的时间核与运动方程已明确实现: `σ(t)=exp(-0.5*((t-µt)/s)^2)`, `µx(t)=µx+v·(t-µt)`.
+  - exporter 的两个关键维度是正交的:
+    - `--splat4d-version`: time/duration 语义(1=window,2=gaussian).
+    - `--splat4d-format-version`: 文件格式(1=legacy无header,2=header+sections).
+- 实际变更(WORKLOG): 本次尚未落地新规格文档,先做续档与准备.
+- 错误与根因(ERRORFIX): 本次不属于 bugfix.
+- 可复用点候选(1-3条):
+  1. 永远区分 timeModel 语义(v1/v2)与文件格式(header/legacy),避免 Unity importer 误读.
+  2. window 语义需要 position 平移到 time0,否则 runtime 的 `pos+vel*(t-time0)`会错.
+  3. velocity 单位必须和 normalized time 对齐(米/帧 vs 米/归一化时间),否则轨迹位移会偏小.
+- 是否需要固化到 docs/specs: 是,写到本仓库 `specs/`.
+- 是否提取/更新 skill: 否.这些内容更偏项目内契约,写 specs 更合适.
